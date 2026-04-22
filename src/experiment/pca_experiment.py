@@ -93,20 +93,61 @@ class PCAExperiment:
         config_name = f"pca_{n_components}" if n_components else "pca_all"
         self.logger.info("PCA run started | config=%s | requested_n_components=%s | save_transformed_data=%s", config_name, n_components, save_transformed_data)
         
-        # Применяем PCA
-        train_pca, valid_pca, test_pca, transformer = apply_pca_to_data(
-            self.train, self.valid, self.test,
-            self.target_columns,
-            n_components=n_components
-        )
+        precomputed_root = kwargs.get('precomputed_pca_root')
+        use_precomputed = False
+
+        if precomputed_root:
+            candidate_dir = Path(precomputed_root) / config_name
+            train_path = candidate_dir / 'train.csv'
+            valid_path = candidate_dir / 'valid.csv'
+            test_path = candidate_dir / 'test.csv'
+            info_path = candidate_dir / 'pca_info.json'
+
+            if train_path.exists() and valid_path.exists() and test_path.exists():
+                use_precomputed = True
+                train_pca = pd.read_csv(train_path)
+                valid_pca = pd.read_csv(valid_path)
+                test_pca = pd.read_csv(test_path)
+
+                # Если в предрасчитанных данных нет target-колонок, подмешиваем из исходных split'ов (без фрагментации DataFrame)
+                missing_train_targets = [c for c in self.target_columns if c not in train_pca.columns]
+                missing_valid_targets = [c for c in self.target_columns if c not in valid_pca.columns]
+                missing_test_targets = [c for c in self.target_columns if c not in test_pca.columns]
+
+                if missing_train_targets:
+                    train_pca = pd.concat([train_pca, self.train[missing_train_targets]], axis=1)
+                if missing_valid_targets:
+                    valid_pca = pd.concat([valid_pca, self.valid[missing_valid_targets]], axis=1)
+                if missing_test_targets:
+                    test_pca = pd.concat([test_pca, self.test[missing_test_targets]], axis=1)
+
+                if info_path.exists():
+                    with open(info_path, 'r', encoding='utf-8') as f:
+                        pca_info = json.load(f)
+                    actual_n_components = int(pca_info.get('n_components', n_components))
+                    variance_explained = float(pca_info.get('total_variance_explained', np.nan))
+                else:
+                    actual_n_components = len([c for c in train_pca.columns if c.startswith('PC')])
+                    variance_explained = np.nan
+
+                transformer = None
+                self.logger.info("Loaded precomputed PCA | config=%s | dir=%s | actual_n_components=%s", config_name, candidate_dir, actual_n_components)
+
+        if not use_precomputed:
+            # Применяем PCA
+            train_pca, valid_pca, test_pca, transformer = apply_pca_to_data(
+                self.train, self.valid, self.test,
+                self.target_columns,
+                n_components=n_components
+            )
         
-        actual_n_components = transformer.n_components_used
-        variance_explained = transformer.cumulative_variance[-1]
-        
-        self.logger.info("PCA transformed | config=%s | actual_n_components=%s | variance_explained=%.6f", config_name, actual_n_components, variance_explained)
-        
-        # Сохраняем трансформер
-        self.transformers[actual_n_components] = transformer
+            actual_n_components = transformer.n_components_used
+            variance_explained = transformer.cumulative_variance[-1]
+
+            self.logger.info("PCA transformed | config=%s | actual_n_components=%s | variance_explained=%.6f", config_name, actual_n_components, variance_explained)
+
+            # Сохраняем трансформер
+            self.transformers[actual_n_components] = transformer
         
         # Создаём Data
         data_pca = Data(train_pca, test_pca, valid_pca, self.target_columns)
@@ -120,16 +161,26 @@ class PCAExperiment:
             test_pca.to_csv(data_dir / "test.csv", index=False)
             
             # Сохраняем информацию о PCA
-            pca_info = transformer.get_info()
+            if transformer is not None:
+                pca_info = transformer.get_info()
+            else:
+                pca_info = {
+                    'n_components': actual_n_components,
+                    'total_variance_explained': float(variance_explained) if pd.notna(variance_explained) else None,
+                    'explained_variance_ratio': None,
+                    'cumulative_variance': None,
+                }
+
             with open(data_dir / "pca_info.json", 'w') as f:
                 json.dump(pca_info, f, indent=2)
             
-            # График explained variance
-            plot_explained_variance(
-                transformer,
-                n_components_to_show=min(50, actual_n_components),
-                save_path=data_dir / "explained_variance.png"
-            )
+            # График explained variance можно строить только если есть fitted transformer
+            if transformer is not None:
+                plot_explained_variance(
+                    transformer,
+                    n_components_to_show=min(50, actual_n_components),
+                    save_path=data_dir / "explained_variance.png"
+                )
         
         # Обучение
         results_dir = self.base_dir / config_name / "results"

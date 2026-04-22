@@ -22,6 +22,15 @@ TRAIN_FILE = "mtsgrvmgn_trn.csv"
 VALID_FILE = "mtsgrvmgn_vld.csv"
 TEST_FILE = "mtsgrvmgn_tst.csv"
 
+# Использовать предрасчитанные PCA-данные из Data/PCA/Difficult_*/...
+USE_PRECOMPUTED_PCA = True
+PRECOMPUTED_PCA_ROOT = DATA_DIR / "PCA"
+DATASET_TO_DIFFICULTY = {
+    'mtsgrvmgn_trn.csv': 'Difficult_1',
+    'train_3.csv': 'Difficult_2',
+    'train_3_1.csv': 'Difficult_3',
+}
+
 # Целевые переменные
 TARGET_COLUMNS = ['H3_8']  # Можно добавить H2_8, H3_8
 
@@ -81,6 +90,11 @@ def main():
         base_dir=EXPERIMENTS_DIR / EXPERIMENT_NAME
     )
     
+    difficulty = DATASET_TO_DIFFICULTY.get(TRAIN_FILE)
+    precomputed_root = None
+    if USE_PRECOMPUTED_PCA and difficulty:
+        precomputed_root = PRECOMPUTED_PCA_ROOT / difficulty
+
     # Запускаем сетку экспериментов
     results = experiment.run_grid(
         n_components_list=N_COMPONENTS_LIST,
@@ -95,7 +109,8 @@ def main():
         batch_size=BATCH_SIZE,
         save_transformed_data=SAVE_TRANSFORMED_DATA,
         device=DEVICE,
-        enable_cv=ENABLE_CV
+        enable_cv=ENABLE_CV,
+        precomputed_pca_root=str(precomputed_root) if precomputed_root else None,
     )
     
     # Графики

@@ -25,6 +25,16 @@ TRAIN_FILE = "mtsgrvmgn_trn.csv"
 VALID_FILE = "mtsgrvmgn_vld.csv"
 TEST_FILE = "mtsgrvmgn_tst.csv"
 
+# Использовать предрасчитанные Aggregated-данные из Data/Aggregated/Difficult_*/...
+USE_PRECOMPUTED_AGGREGATED = True
+PRECOMPUTED_AGGREGATED_ROOT = DATA_DIR / "Aggregated"
+DATASET_TO_DIFFICULTY = {
+    'mtsgrvmgn_trn.csv': 'Difficult_1',
+    'train_3.csv': 'Difficult_2',
+    'train_3_1.csv': 'Difficult_3',
+}
+
+
 # Целевые переменные
 TARGET_COLUMNS = ['H3_8']  # Или ['H3_8'] для одной цели
 
@@ -83,6 +93,11 @@ def main():
         experiment_name=EXPERIMENT_NAME
     )
     
+    difficulty = DATASET_TO_DIFFICULTY.get(TRAIN_FILE)
+    precomputed_root = None
+    if USE_PRECOMPUTED_AGGREGATED and difficulty:
+        precomputed_root = PRECOMPUTED_AGGREGATED_ROOT / difficulty
+
     # Запуск
     results = experiment.run_grid(
         freq_steps=FREQ_STEPS,
@@ -99,8 +114,10 @@ def main():
         batch_size=BATCH_SIZE,
         save_transformed_data=SAVE_TRANSFORMED_DATA,
         device=DEVICE,
-        enable_cv=ENABLE_CV
+        enable_cv=ENABLE_CV,
+        precomputed_aggregated_root=str(precomputed_root) if precomputed_root else None,
     )
+    
     
     
     

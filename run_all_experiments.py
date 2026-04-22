@@ -54,6 +54,18 @@ ENABLE_CV = False
 DATA_DIR = PROJECT_ROOT / "Data"
 EXPERIMENTS_BASE_DIR = EXPERIMENTS_DIR
 
+# Использовать предрасчитанные transformed-данные
+USE_PRECOMPUTED_AGGREGATED = True
+USE_PRECOMPUTED_PCA = True
+PRECOMPUTED_AGGREGATED_ROOT = DATA_DIR / "Aggregated"
+PRECOMPUTED_PCA_ROOT = DATA_DIR / "PCA"
+
+DATASET_TO_DIFFICULTY = {
+    'mtsgrvmgn_trn.csv': 'Difficult_1',
+    'train_3.csv': 'Difficult_2',
+    'train_3_1.csv': 'Difficult_3',
+}
+
 # =============================================================================
 # СПИСОК ЭКСПЕРИМЕНТОВ (порядок важен!)
 # =============================================================================
@@ -184,7 +196,7 @@ EXPERIMENTS = [
 ]
 
 
-def run_pca_experiment(train, valid, test, target, exp_name):
+def run_pca_experiment(train, valid, test, target, exp_name, precomputed_pca_root: Path = None):
     """Запуск PCA эксперимента"""
     print(f"\n{'='*60}")
     print(f"PCA: {exp_name} (target={target})")
@@ -212,7 +224,8 @@ def run_pca_experiment(train, valid, test, target, exp_name):
         batch_size=BATCH_SIZE,
         save_transformed_data=SAVE_TRANSFORMED_DATA,
         device=DEVICE,
-        enable_cv=ENABLE_CV
+        enable_cv=ENABLE_CV,
+        precomputed_pca_root=str(precomputed_pca_root) if precomputed_pca_root else None,
     )
 
     # Графики
@@ -226,7 +239,7 @@ def run_pca_experiment(train, valid, test, target, exp_name):
     return experiment
 
 
-def run_aggregation_experiment(train, valid, test, target, exp_name):
+def run_aggregation_experiment(train, valid, test, target, exp_name, precomputed_aggregated_root: Path = None):
     """Запуск агрегации"""
     print(f"\n{'='*60}")
     print(f"AGG: {exp_name} (target={target})")
@@ -256,7 +269,8 @@ def run_aggregation_experiment(train, valid, test, target, exp_name):
         batch_size=BATCH_SIZE,
         save_transformed_data=SAVE_TRANSFORMED_DATA,
         device=DEVICE,
-        enable_cv=ENABLE_CV
+        enable_cv=ENABLE_CV,
+        precomputed_aggregated_root=str(precomputed_aggregated_root) if precomputed_aggregated_root else None,
     )
 
     # Графики
@@ -307,15 +321,39 @@ def main():
             continue
 
         try:
-            # Загружаем данные
+            # Загружаем исходные данные (нужны для target-колонок)
             train, valid, test = load_mtz_data(train_path, valid_path, test_path, verbose=False)
             print(f"  Данные: train={len(train)}, valid={len(valid)}, test={len(test)}")
 
+            difficulty_name = DATASET_TO_DIFFICULTY.get(train_file)
+            precomputed_agg_root = None
+            precomputed_pca_root = None
+
+            if difficulty_name:
+                if USE_PRECOMPUTED_AGGREGATED:
+                    precomputed_agg_root = PRECOMPUTED_AGGREGATED_ROOT / difficulty_name
+                if USE_PRECOMPUTED_PCA:
+                    precomputed_pca_root = PRECOMPUTED_PCA_ROOT / difficulty_name
+
             # Запускаем эксперимент
             if exp_type == 'pca':
-                run_pca_experiment(train, valid, test, target, exp_name)
+                run_pca_experiment(
+                    train,
+                    valid,
+                    test,
+                    target,
+                    exp_name,
+                    precomputed_pca_root=precomputed_pca_root,
+                )
             else:
-                run_aggregation_experiment(train, valid, test, target, exp_name)
+                run_aggregation_experiment(
+                    train,
+                    valid,
+                    test,
+                    target,
+                    exp_name,
+                    precomputed_aggregated_root=precomputed_agg_root,
+                )
 
             completed += 1
 

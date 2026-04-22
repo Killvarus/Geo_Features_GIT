@@ -131,19 +131,49 @@ class AggregationExperiment:
         config_name = f"freq{freq_step}_pickup{pickup_step}_{agg_method}"
         self.logger.info("Run started | config=%s | freq_step=%s | pickup_step=%s | agg_method=%s | save_transformed_data=%s", config_name, freq_step, pickup_step, agg_method, save_transformed_data)
         
-        # Агрегация ИСХОДНЫХ данных (с целевыми переменными)
-        agg_config = AggregationConfig(
-            freq_step=freq_step,
-            pickup_step=pickup_step,
-            agg_method=agg_method
-        )
+        precomputed_root = kwargs.get('precomputed_aggregated_root')
+        use_precomputed = False
+
+        if precomputed_root:
+            candidate_dir = Path(precomputed_root) / config_name
+            train_path = candidate_dir / 'train.csv'
+            valid_path = candidate_dir / 'valid.csv'
+            test_path = candidate_dir / 'test.csv'
+            if train_path.exists() and valid_path.exists() and test_path.exists():
+                use_precomputed = True
+                train_agg = pd.read_csv(train_path)
+                valid_agg = pd.read_csv(valid_path)
+                test_agg = pd.read_csv(test_path)
+
+                # Если в предрасчитанных данных нет target-колонок, подмешиваем из исходных split'ов (без фрагментации DataFrame)
+                missing_train_targets = [c for c in self.target_columns if c not in train_agg.columns]
+                missing_valid_targets = [c for c in self.target_columns if c not in valid_agg.columns]
+                missing_test_targets = [c for c in self.target_columns if c not in test_agg.columns]
+
+                if missing_train_targets:
+                    train_agg = pd.concat([train_agg, self._train_raw[missing_train_targets]], axis=1)
+                if missing_valid_targets:
+                    valid_agg = pd.concat([valid_agg, self._valid_raw[missing_valid_targets]], axis=1)
+                if missing_test_targets:
+                    test_agg = pd.concat([test_agg, self._test_raw[missing_test_targets]], axis=1)
+
+                new_features = [c for c in train_agg.columns if not c.startswith('H')]
+                self.logger.info("Loaded precomputed aggregation | config=%s | dir=%s | n_features=%s", config_name, candidate_dir, len(new_features))
+
+        if not use_precomputed:
+            # Агрегация ИСХОДНЫХ данных (с целевыми переменными)
+            agg_config = AggregationConfig(
+                freq_step=freq_step,
+                pickup_step=pickup_step,
+                agg_method=agg_method
+            )
         
-        train_agg, valid_agg, test_agg, new_features = aggregate_features(
-            self._train_raw, self._valid_raw, self._test_raw,
-            agg_config, self.target_columns
-        )
-        
-        self.logger.info("Aggregation completed | config=%s | n_features=%s", config_name, len(new_features))
+            train_agg, valid_agg, test_agg, new_features = aggregate_features(
+                self._train_raw, self._valid_raw, self._test_raw,
+                agg_config, self.target_columns
+            )
+
+            self.logger.info("Aggregation completed | config=%s | n_features=%s", config_name, len(new_features))
         
         # Создаём Data из агрегированных данных
         data_agg = Data(train_agg, test_agg, valid_agg, self.target_columns)
