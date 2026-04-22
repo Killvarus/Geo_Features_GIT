@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src.config import PROJECT_ROOT, EXPERIMENTS_DIR
 from src.experiment import PCAExperiment, AggregationExperiment
 from src.utils import load_mtz_data
+from src.visualization.experiment_plots import generate_all_plots
+from plot_missing_graphs import process_experiment
 
 
 # =============================================================================
@@ -38,7 +40,7 @@ AGG_METHODS = ['mean']
 
 # Параметры обучения (общие для всех экспериментов)
 N_ITER = 1
-NUM_EPOCHS = 10000
+NUM_EPOCHS = 1
 LEARNING_RATE = 0.01
 OPTIMIZER = 'sgd'
 PATIENCE = 250
@@ -388,6 +390,55 @@ def main():
         f.write("\n".join(summary))
 
     print(f"\nСводка сохранена: {EXPERIMENTS_BASE_DIR / 'all_experiments_summary.txt'}")
+
+    # Финальный проход: достроить все недостающие графики по экспериментам
+    print("\n" + "=" * 70)
+    print("ПОСТРОЕНИЕ НЕДОСТАЮЩИХ ГРАФИКОВ")
+    print("=" * 70)
+
+    plot_total = {'created': 0, 'skipped': 0, 'errors': 0}
+    exp_dirs = sorted([p for p in EXPERIMENTS_BASE_DIR.iterdir() if p.is_dir()])
+
+    for exp_dir in exp_dirs:
+        stats = process_experiment(exp_dir)
+        plot_total['created'] += stats.get('created', 0)
+        plot_total['skipped'] += stats.get('skipped', 0)
+        plot_total['errors'] += stats.get('errors', 0)
+        print(f"- {exp_dir.name}: created={stats.get('created', 0)}, skipped={stats.get('skipped', 0)}, errors={stats.get('errors', 0)}")
+
+    print("\nИТОГО ПО ГРАФИКАМ:")
+    print(f"created={plot_total['created']}, skipped={plot_total['skipped']}, errors={plot_total['errors']}")
+
+    # Дополнительный принудительный проход для aggregation:
+    # гарантируем построение all_experiments_r2 / features_vs_r2 / features_vs_r2_detailed
+    print("\n" + "=" * 70)
+    print("ПРИНУДИТЕЛЬНАЯ ГЕНЕРАЦИЯ AGGREGATION-ГРАФИКОВ")
+    print("=" * 70)
+
+    required_agg_plots = [
+        'all_experiments_r2.png',
+        'features_vs_r2.png',
+        'features_vs_r2_detailed.png',
+    ]
+
+    for exp_dir in sorted([p for p in EXPERIMENTS_BASE_DIR.iterdir() if p.is_dir() and p.name.startswith('aggregation_')]):
+        plots_dir = exp_dir / 'plots'
+        plots_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            figs = generate_all_plots(exp_dir, output_dir=plots_dir, metrics=['r2', 'mse', 'mae'])
+            for fig in figs.values():
+                if fig is not None:
+                    import matplotlib.pyplot as plt
+                    plt.close(fig)
+
+            missing = [name for name in required_agg_plots if not (plots_dir / name).exists()]
+            if missing:
+                print(f"[WARN] {exp_dir.name}: не удалось построить {missing}")
+            else:
+                print(f"[OK] {exp_dir.name}: все ключевые aggregation-графики построены")
+        except Exception as e:
+            print(f"[X] {exp_dir.name}: ошибка генерации aggregation-графиков: {e}")
 
 
 if __name__ == '__main__':

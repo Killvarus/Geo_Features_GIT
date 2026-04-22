@@ -557,7 +557,7 @@ def to_excel_optimized_OLP(
                 row['Model_Path'] = r['history'].get('model_path', '')
                 raw_data.append(row)
 
-            pd.DataFrame(raw_data).to_excel(writer, 'Raw_Results', index=False)
+            pd.DataFrame(raw_data).to_excel(writer, sheet_name='Raw_Results', index=False)
 
             summary = []
             if raw_data:
@@ -575,7 +575,7 @@ def to_excel_optimized_OLP(
                                 'Max': float(np.max(vals)),
                             })
 
-            pd.DataFrame(summary).to_excel(writer, 'Summary', index=False)
+            pd.DataFrame(summary).to_excel(writer, sheet_name='Summary', index=False)
 
             meta = pd.DataFrame({
                 'Parameter': [
@@ -589,7 +589,7 @@ def to_excel_optimized_OLP(
                     optimizer_type, momentum, tolerance, tolerance_mode, random_state, device or 'auto', enable_cv
                 ]
             })
-            meta.to_excel(writer, 'Meta', index=False)
+            meta.to_excel(writer, sheet_name='Meta', index=False)
 
         logger.info("Results saved to %s", file_name)
     except Exception as e:
