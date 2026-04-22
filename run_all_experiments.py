@@ -31,7 +31,7 @@ from plot_missing_graphs import process_experiment
 # =============================================================================
 
 # Параметры PCA
-N_COMPONENTS_LIST = [16, 64, 256, 512, 1024, 1536]
+N_COMPONENTS_LIST = [16, 64, 256, 512, 1024, 1536,2048]
 
 # Параметры агрегации
 FREQ_STEPS = [1, 2, 3]
