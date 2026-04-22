@@ -173,7 +173,7 @@ class AggregationExperiment:
         # Импортируем функцию обучения
         from ..models.neural_network import to_excel_optimized_OLP
         
-        to_excel_optimized_OLP(
+        all_results = to_excel_optimized_OLP(
             file_name=str(excel_path),
             n_iter=n_iter,
             X_train=data_agg.X_train,
@@ -201,8 +201,25 @@ class AggregationExperiment:
         
         total_time = time.time() - start_time
         
-        # Извлекаем метрики
-        metrics = extract_metrics_from_excel(excel_path)
+        # Метрики: сначала считаем из in-memory результатов, fallback — из Excel
+        metrics = {}
+        metric_names = ['R2', 'MSE', 'MAE', 'Pearson']
+        for metric_name in metric_names:
+            iter_vals = []
+            for run_result in all_results:
+                df_test = run_result.get('test')
+                if df_test is None or metric_name not in df_test.columns:
+                    continue
+                vals = [float(v) for v in df_test[metric_name].dropna().values]
+                if vals:
+                    iter_vals.append(float(np.mean(vals)))
+            if iter_vals:
+                key = metric_name.lower()
+                metrics[f'{key}_mean'] = float(np.mean(iter_vals))
+                metrics[f'{key}_std'] = float(np.std(iter_vals))
+
+        if not metrics:
+            metrics = extract_metrics_from_excel(excel_path)
         
         # Создаём результат
         result = ExperimentResult(

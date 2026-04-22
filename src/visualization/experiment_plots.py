@@ -126,6 +126,15 @@ def load_all_summaries(experiment_dir: Path) -> pd.DataFrame:
             if 'optimizer' in meta_map and pd.notna(meta_map['optimizer']):
                 row['optimizer'] = str(meta_map['optimizer'])
 
+        try:
+            raw_df = pd.read_excel(metrics_path, sheet_name='Raw_Results')
+            if 'Time' in raw_df.columns:
+                times = pd.to_numeric(raw_df['Time'], errors='coerce').dropna()
+                if not times.empty:
+                    row['total_time_seconds'] = float(times.mean())
+        except Exception:
+            pass
+
         results.append(row)
     
     if not results:

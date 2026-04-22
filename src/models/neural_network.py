@@ -539,58 +539,62 @@ def to_excel_optimized_OLP(
             'history': history,
         })
 
-    with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-        raw_data = []
-        for r in all_results:
-            row = {'Iteration': r['iteration']}
+    try:
+        with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
+            raw_data = []
+            for r in all_results:
+                row = {'Iteration': r['iteration']}
 
-            for metric in ['R2', 'MSE', 'MAE', 'Pearson']:
-                for t in range(output_dim):
-                    col = f'Оценка{t+1}'
-                    if col in r['test'].index:
-                        row[f'Test_{metric}_Target{t+1}'] = r['test'].loc[col, metric]
-
-            row['Best_Epoch'] = r['history']['best_epoch'] + 1
-            row['Best_Val_Loss'] = r['history']['best_val_loss']
-            row['Time'] = r['history']['total_time']
-            row['Model_Path'] = r['history'].get('model_path', '')
-            raw_data.append(row)
-
-        pd.DataFrame(raw_data).to_excel(writer, 'Raw_Results', index=False)
-
-        summary = []
-        if raw_data:
-            for t in range(output_dim):
                 for metric in ['R2', 'MSE', 'MAE', 'Pearson']:
-                    col = f'Test_{metric}_Target{t+1}'
-                    if col in raw_data[0]:
-                        vals = [r[col] for r in raw_data]
-                        summary.append({
-                            'Target': f'Target_{t+1}',
-                            'Metric': metric,
-                            'Mean': float(np.mean(vals)),
-                            'Std': float(np.std(vals)),
-                            'Min': float(np.min(vals)),
-                            'Max': float(np.max(vals)),
-                        })
+                    for t in range(output_dim):
+                        col = f'Оценка{t+1}'
+                        if col in r['test'].index:
+                            row[f'Test_{metric}_Target{t+1}'] = r['test'].loc[col, metric]
 
-        pd.DataFrame(summary).to_excel(writer, 'Summary', index=False)
+                row['Best_Epoch'] = r['history']['best_epoch'] + 1
+                row['Best_Val_Loss'] = r['history']['best_val_loss']
+                row['Time'] = r['history']['total_time']
+                row['Model_Path'] = r['history'].get('model_path', '')
+                raw_data.append(row)
 
-        meta = pd.DataFrame({
-            'Parameter': [
-                'n_iter', 'batch_size', 'input_dim', 'output_dim',
-                'learning_rate', 'num_epochs', 'patience', 'hidden_dim',
-                'optimizer', 'momentum', 'tolerance', 'tolerance_mode', 'random_state', 'device', 'enable_cv'
-            ],
-            'Value': [
-                n_iter, batch_size, input_dim, output_dim,
-                learning_rate, num_epochs, patience, hidden_dim,
-                optimizer_type, momentum, tolerance, tolerance_mode, random_state, device or 'auto', enable_cv
-            ]
-        })
-        meta.to_excel(writer, 'Meta', index=False)
+            pd.DataFrame(raw_data).to_excel(writer, 'Raw_Results', index=False)
 
-    logger.info("Results saved to %s", file_name)
+            summary = []
+            if raw_data:
+                for t in range(output_dim):
+                    for metric in ['R2', 'MSE', 'MAE', 'Pearson']:
+                        col = f'Test_{metric}_Target{t+1}'
+                        if col in raw_data[0]:
+                            vals = [r[col] for r in raw_data]
+                            summary.append({
+                                'Target': f'Target_{t+1}',
+                                'Metric': metric,
+                                'Mean': float(np.mean(vals)),
+                                'Std': float(np.std(vals)),
+                                'Min': float(np.min(vals)),
+                                'Max': float(np.max(vals)),
+                            })
+
+            pd.DataFrame(summary).to_excel(writer, 'Summary', index=False)
+
+            meta = pd.DataFrame({
+                'Parameter': [
+                    'n_iter', 'batch_size', 'input_dim', 'output_dim',
+                    'learning_rate', 'num_epochs', 'patience', 'hidden_dim',
+                    'optimizer', 'momentum', 'tolerance', 'tolerance_mode', 'random_state', 'device', 'enable_cv'
+                ],
+                'Value': [
+                    n_iter, batch_size, input_dim, output_dim,
+                    learning_rate, num_epochs, patience, hidden_dim,
+                    optimizer_type, momentum, tolerance, tolerance_mode, random_state, device or 'auto', enable_cv
+                ]
+            })
+            meta.to_excel(writer, 'Meta', index=False)
+
+        logger.info("Results saved to %s", file_name)
+    except Exception as e:
+        logger.exception("Failed to save Excel results to %s: %s", file_name, e)
+
     return all_results
 
 
