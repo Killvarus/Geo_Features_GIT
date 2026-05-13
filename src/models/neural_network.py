@@ -271,9 +271,13 @@ def OLP(
         val_samples = 0
         with torch.no_grad():
             if use_cuda:
-                for batch_indices in torch.arange(X_valid_t.size(0), device=device).split(batch_size):
-                    loss = criterion(model(X_valid_t[batch_indices]), y_valid_t[batch_indices])
-                    batch_size_current = len(batch_indices)
+                n_valid = X_valid_t.size(0)
+                for start in range(0, n_valid, batch_size):
+                    end = min(start + batch_size, n_valid)
+                    X_batch = X_valid_t[start:end]
+                    y_batch = y_valid_t[start:end]
+                    loss = criterion(model(X_batch), y_batch)
+                    batch_size_current = end - start
                     val_loss_sum += loss.item() * batch_size_current
                     val_samples += batch_size_current
             else:

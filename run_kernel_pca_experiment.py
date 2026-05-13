@@ -9,9 +9,10 @@
 - ограничение размера train для fit KernelPCA
 
 Скрипт:
-1) строит KernelPCA-преобразования и сохраняет их в Data/KernelPCA/... (без H*),
-2) обучает OLP на этих признаках,
-3) сохраняет метрики и графики в experiments/...
+1) может загрузить готовые KernelPCA-преобразования из Data/KernelPCA/... (без H*),
+2) если готовых данных нет — строит KernelPCA-преобразования и сохраняет их,
+3) обучает OLP на признаках,
+4) сохраняет метрики и графики в experiments/...
 """
 
 import json
@@ -39,7 +40,7 @@ from src.utils import Data, load_mtz_data
 
 DATA_DIR = PROJECT_ROOT / "Data"
 
-DIFFICULTY = "Difficult_1"
+DIFFICULTIES = ["Difficult_1", "Difficult_2", "Difficult_3"]
 DIFFICULTY_TO_FILES = {
     "Difficult_1": ("mtsgrvmgn_trn.csv", "mtsgrvmgn_vld.csv", "mtsgrvmgn_tst.csv"),
     "Difficult_2": ("train_3.csv", "valid_3.csv", "test_3.csv"),
@@ -49,8 +50,8 @@ DIFFICULTY_TO_FILES = {
 TARGET_COLUMNS = ["H3_8"]
 
 # Kernel PCA
-N_COMPONENTS_LIST = [16, 64, 256, 512, 1024, 1536, 2048]
-KPCA_GAMMAS = [0.0001, 0.001, 0.01]
+N_COMPONENTS_LIST = [2048]
+KPCA_GAMMAS = [0.01]
 MAX_TRAIN_SAMPLES_FOR_KPCA_FIT = 22000
 RANDOM_STATE = 42
 
@@ -58,7 +59,7 @@ RANDOM_STATE = 42
 N_ITER = 3
 NUM_EPOCHS = 100000
 LEARNING_RATE = 0.01
-OPTIMIZER = "adam"
+OPTIMIZER = "sgd"
 MOMENTUM = 0.9
 PATIENCE = 100
 TOLERANCE = 0.003
@@ -71,7 +72,9 @@ ENABLE_CV = False
 # Артефакты
 SAVE_TRANSFORMED_DATA = True
 KERNEL_PCA_DATA_ROOT = DATA_DIR / "KernelPCA"
-EXPERIMENT_NAME = f"kernel_pca_rbf_{DIFFICULTY.lower()}_{'_'.join(TARGET_COLUMNS)}"
+USE_PRECOMPUTED_KERNEL_PCA = True
+PRECOMPUTED_ONLY = True  # True: обучать только на уже готовых Data/KernelPCA/... CSV
+EXPERIMENT_NAME = f"kernel_pca_rbf_all_difficulties_{'_'.join(TARGET_COLUMNS)}"
 EXPERIMENT_BASE_DIR = EXPERIMENTS_DIR / EXPERIMENT_NAME
 
 
@@ -210,242 +213,282 @@ def _plot_kpca_space_3d(train_kpca: pd.DataFrame, y_train: pd.Series, save_path:
 
 
 def main():
-    if DIFFICULTY not in DIFFICULTY_TO_FILES:
-        raise ValueError(f"Unknown DIFFICULTY: {DIFFICULTY}")
-
-    train_file, valid_file, test_file = DIFFICULTY_TO_FILES[DIFFICULTY]
-
-    train_path = DATA_DIR / train_file
-    valid_path = DATA_DIR / valid_file
-    test_path = DATA_DIR / test_file
+    unknown_difficulties = [d for d in DIFFICULTIES if d not in DIFFICULTY_TO_FILES]
+    if unknown_difficulties:
+        raise ValueError(f"Unknown DIFFICULTIES: {unknown_difficulties}")
 
     print("=" * 80)
     print("KERNEL PCA (RBF) EXPERIMENT")
     print("=" * 80)
-    print(f"Difficulty: {DIFFICULTY}")
+    print(f"Difficulties: {DIFFICULTIES}")
     print(f"Targets: {TARGET_COLUMNS}")
     print(f"n_components_list: {N_COMPONENTS_LIST}")
     print(f"gammas: {KPCA_GAMMAS}")
     print(f"max_train_samples_for_fit: {MAX_TRAIN_SAMPLES_FOR_KPCA_FIT}")
-
-    train_df, valid_df, test_df = load_mtz_data(train_path, valid_path, test_path, verbose=True)
-
-    feature_cols = [c for c in train_df.columns if not c.startswith("H")]
-    print(f"Original feature count: {len(feature_cols)}")
+    print(f"use_precomputed_kernel_pca: {USE_PRECOMPUTED_KERNEL_PCA}")
+    print(f"precomputed_only: {PRECOMPUTED_ONLY}")
 
     # База артефактов
     EXPERIMENT_BASE_DIR.mkdir(parents=True, exist_ok=True)
     plots_dir = EXPERIMENT_BASE_DIR / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    transformed_base = KERNEL_PCA_DATA_ROOT / DIFFICULTY
-    transformed_base.mkdir(parents=True, exist_ok=True)
-
     results_rows: List[Dict] = []
 
-    X_train = train_df[feature_cols]
-    X_valid = valid_df[feature_cols]
-    X_test = test_df[feature_cols]
+    for difficulty in DIFFICULTIES:
+        train_file, valid_file, test_file = DIFFICULTY_TO_FILES[difficulty]
+        train_path = DATA_DIR / train_file
+        valid_path = DATA_DIR / valid_file
+        test_path = DATA_DIR / test_file
 
-    y_train = train_df[TARGET_COLUMNS]
-    y_valid = valid_df[TARGET_COLUMNS]
-    y_test = test_df[TARGET_COLUMNS]
+        print("\n" + "#" * 80)
+        print(f"DIFFICULTY: {difficulty}")
+        print("#" * 80)
 
-    for gamma in KPCA_GAMMAS:
-        for n_components in N_COMPONENTS_LIST:
-            config_name = f"kpca_rbf_gamma{gamma}_n{n_components}"
-            print("\n" + "-" * 80)
-            print(f"[RUN] {config_name}")
+        train_df, valid_df, test_df = load_mtz_data(train_path, valid_path, test_path, verbose=True)
 
-            config_dir = EXPERIMENT_BASE_DIR / config_name
-            config_dir.mkdir(parents=True, exist_ok=True)
+        feature_cols = [c for c in train_df.columns if not c.startswith("H")]
+        print(f"Original feature count: {len(feature_cols)}")
 
-            start_time = time.time()
+        transformed_base = KERNEL_PCA_DATA_ROOT / difficulty
+        transformed_base.mkdir(parents=True, exist_ok=True)
 
-            # 1) KernelPCA fit/transform
-            imputer, scaler, kpca = _fit_kernel_pca_on_train(
-                X_train=X_train,
-                n_components=n_components,
-                gamma=gamma,
-                max_train_samples_for_fit=MAX_TRAIN_SAMPLES_FOR_KPCA_FIT,
-                random_state=RANDOM_STATE,
-            )
+        X_train = train_df[feature_cols]
+        X_valid = valid_df[feature_cols]
+        X_test = test_df[feature_cols]
 
-            train_kpca = _transform_with_kpca(X_train, imputer, scaler, kpca, n_components)
-            valid_kpca = _transform_with_kpca(X_valid, imputer, scaler, kpca, n_components)
-            test_kpca = _transform_with_kpca(X_test, imputer, scaler, kpca, n_components)
+        y_train = train_df[TARGET_COLUMNS]
+        y_valid = valid_df[TARGET_COLUMNS]
+        y_test = test_df[TARGET_COLUMNS]
 
-            # 2) Сохранение transformed-признаков (без H*)
-            transformed_cfg_dir = transformed_base / config_name
-            if SAVE_TRANSFORMED_DATA:
-                transformed_cfg_dir.mkdir(parents=True, exist_ok=True)
-                train_kpca.to_csv(transformed_cfg_dir / "train.csv", index=False)
-                valid_kpca.to_csv(transformed_cfg_dir / "valid.csv", index=False)
-                test_kpca.to_csv(transformed_cfg_dir / "test.csv", index=False)
+        for gamma in KPCA_GAMMAS:
+            for n_components in N_COMPONENTS_LIST:
+                config_name = f"kpca_rbf_gamma{gamma}_n{n_components}"
+                print("\n" + "-" * 80)
+                print(f"[RUN] {difficulty} | {config_name}")
 
-                with open(transformed_cfg_dir / "kpca_info.json", "w", encoding="utf-8") as f:
-                    json.dump(
-                        {
-                            "method": "KernelPCA",
-                            "kernel": "rbf",
-                            "gamma": gamma,
-                            "n_components": n_components,
-                            "max_train_samples_for_fit": MAX_TRAIN_SAMPLES_FOR_KPCA_FIT,
-                            "random_state": RANDOM_STATE,
-                            "difficulty": DIFFICULTY,
-                        },
-                        f,
-                        ensure_ascii=False,
-                        indent=2,
+                config_dir = EXPERIMENT_BASE_DIR / difficulty / config_name
+                config_dir.mkdir(parents=True, exist_ok=True)
+
+                start_time = time.time()
+
+                # 1) Получение KernelPCA признаков: из precomputed или через fit/transform
+                transformed_cfg_dir = transformed_base / config_name
+                precomputed_train_path = transformed_cfg_dir / "train.csv"
+                precomputed_valid_path = transformed_cfg_dir / "valid.csv"
+                precomputed_test_path = transformed_cfg_dir / "test.csv"
+
+                use_precomputed_current = (
+                    USE_PRECOMPUTED_KERNEL_PCA
+                    and precomputed_train_path.exists()
+                    and precomputed_valid_path.exists()
+                    and precomputed_test_path.exists()
+                )
+
+                if use_precomputed_current:
+                    print(f"[LOAD] precomputed KPCA: {transformed_cfg_dir}")
+                    train_kpca = pd.read_csv(precomputed_train_path)
+                    valid_kpca = pd.read_csv(precomputed_valid_path)
+                    test_kpca = pd.read_csv(precomputed_test_path)
+                else:
+                    if PRECOMPUTED_ONLY:
+                        print(f"[SKIP] missing precomputed KPCA: {difficulty}/{config_name}")
+                        continue
+
+                    print(f"[FIT ] KPCA from raw data: {difficulty}/{config_name}")
+                    imputer, scaler, kpca = _fit_kernel_pca_on_train(
+                        X_train=X_train,
+                        n_components=n_components,
+                        gamma=gamma,
+                        max_train_samples_for_fit=MAX_TRAIN_SAMPLES_FOR_KPCA_FIT,
+                        random_state=RANDOM_STATE,
                     )
 
-            # 3) Визуализации пространства компонент
-            _plot_kpca_space_2d(
-                train_kpca,
-                y_train[TARGET_COLUMNS[0]],
-                plots_dir / f"kpca_space_2d_{config_name}.png",
-            )
-            _plot_kpca_space_3d(
-                train_kpca,
-                y_train[TARGET_COLUMNS[0]],
-                plots_dir / f"kpca_space_3d_{config_name}.png",
-            )
+                    train_kpca = _transform_with_kpca(X_train, imputer, scaler, kpca, n_components)
+                    valid_kpca = _transform_with_kpca(X_valid, imputer, scaler, kpca, n_components)
+                    test_kpca = _transform_with_kpca(X_test, imputer, scaler, kpca, n_components)
 
-            # 4) Обучение OLP (подмешиваем таргеты из исходных данных)
-            train_model = train_kpca.copy()
-            valid_model = valid_kpca.copy()
-            test_model = test_kpca.copy()
+                    # 2) Сохранение transformed-признаков (без H*)
+                    if SAVE_TRANSFORMED_DATA:
+                        transformed_cfg_dir.mkdir(parents=True, exist_ok=True)
+                        train_kpca.to_csv(precomputed_train_path, index=False)
+                        valid_kpca.to_csv(precomputed_valid_path, index=False)
+                        test_kpca.to_csv(precomputed_test_path, index=False)
 
-            for target in TARGET_COLUMNS:
-                train_model[target] = y_train[target].values
-                valid_model[target] = y_valid[target].values
-                test_model[target] = y_test[target].values
+                        with open(transformed_cfg_dir / "kpca_info.json", "w", encoding="utf-8") as f:
+                            json.dump(
+                                {
+                                    "method": "KernelPCA",
+                                    "kernel": "rbf",
+                                    "gamma": gamma,
+                                    "n_components": n_components,
+                                    "max_train_samples_for_fit": MAX_TRAIN_SAMPLES_FOR_KPCA_FIT,
+                                    "random_state": RANDOM_STATE,
+                                    "difficulty": difficulty,
+                                },
+                                f,
+                                ensure_ascii=False,
+                                indent=2,
+                            )
 
-            data = Data(train_model, test_model, valid_model, TARGET_COLUMNS)
+                # 3) Визуализации пространства компонент
+                _plot_kpca_space_2d(
+                    train_kpca,
+                    y_train[TARGET_COLUMNS[0]],
+                    plots_dir / f"kpca_space_2d_{difficulty}_{config_name}.png",
+                )
+                _plot_kpca_space_3d(
+                    train_kpca,
+                    y_train[TARGET_COLUMNS[0]],
+                    plots_dir / f"kpca_space_3d_{difficulty}_{config_name}.png",
+                )
 
-            results_dir = config_dir / "results"
-            curves_dir = config_dir / "learning_curves"
-            models_dir = config_dir / "models"
-            logs_dir = config_dir / "logs"
+                # 4) Обучение OLP (подмешиваем таргеты из исходных данных)
+                train_model = train_kpca.copy()
+                valid_model = valid_kpca.copy()
+                test_model = test_kpca.copy()
 
-            results_dir.mkdir(parents=True, exist_ok=True)
-            curves_dir.mkdir(parents=True, exist_ok=True)
-            models_dir.mkdir(parents=True, exist_ok=True)
-            logs_dir.mkdir(parents=True, exist_ok=True)
+                for target in TARGET_COLUMNS:
+                    train_model[target] = y_train[target].values
+                    valid_model[target] = y_valid[target].values
+                    test_model[target] = y_test[target].values
 
-            excel_path = results_dir / "metrics.xlsx"
+                data = Data(train_model, test_model, valid_model, TARGET_COLUMNS)
 
-            all_results = to_excel_optimized_OLP(
-                file_name=str(excel_path),
-                n_iter=N_ITER,
-                X_train=data.X_train,
-                y_train=data.y_train,
-                X_valid=data.X_valid,
-                y_valid=data.y_valid,
-                X_test=data.X_test,
-                y_test=data.y_test,
-                batch_size=BATCH_SIZE,
-                input_dim=data.n_features,
-                output_dim=data.n_targets,
-                learning_rate=LEARNING_RATE,
-                num_epochs=NUM_EPOCHS,
-                patience=PATIENCE,
-                hidden_dim=HIDDEN_DIM,
-                save_plots_dir=str(curves_dir),
-                save_models_dir=str(models_dir),
-                optimizer_type=OPTIMIZER,
-                momentum=MOMENTUM,
-                tolerance=TOLERANCE,
-                tolerance_mode=TOLERANCE_MODE,
-                random_state=RANDOM_STATE,
-                device=DEVICE,
-                log_file=str(logs_dir / "training.log"),
-                enable_cv=ENABLE_CV,
-            )
+                results_dir = config_dir / "results"
+                curves_dir = config_dir / "learning_curves"
+                models_dir = config_dir / "models"
+                logs_dir = config_dir / "logs"
 
-            total_time = time.time() - start_time
-            metrics = _extract_metrics_from_all_results(all_results)
+                results_dir.mkdir(parents=True, exist_ok=True)
+                curves_dir.mkdir(parents=True, exist_ok=True)
+                models_dir.mkdir(parents=True, exist_ok=True)
+                logs_dir.mkdir(parents=True, exist_ok=True)
 
-            row = {
-                "experiment_type": "kernel_pca",
-                "experiment_id": config_name,
-                "difficulty": DIFFICULTY,
-                "target": ",".join(TARGET_COLUMNS),
-                "kernel": "rbf",
-                "gamma": gamma,
-                "n_components": n_components,
-                "n_features": n_components,
-                "original_n_features": len(feature_cols),
-                "compression_ratio": len(feature_cols) / n_components,
-                "n_samples_train": len(train_model),
-                "n_samples_valid": len(valid_model),
-                "n_samples_test": len(test_model),
-                "n_iter": N_ITER,
-                "num_epochs": NUM_EPOCHS,
-                "learning_rate": LEARNING_RATE,
-                "optimizer": OPTIMIZER,
-                "momentum": MOMENTUM,
-                "patience": PATIENCE,
-                "tolerance": TOLERANCE,
-                "tolerance_mode": TOLERANCE_MODE,
-                "hidden_dim": HIDDEN_DIM,
-                "batch_size": BATCH_SIZE,
-                "device": DEVICE,
-                "total_time_seconds": total_time,
-                "r2_mean": metrics.get("r2_mean", 0.0),
-                "r2_std": metrics.get("r2_std", 0.0),
-                "mse_mean": metrics.get("mse_mean", 0.0),
-                "mse_std": metrics.get("mse_std", 0.0),
-                "mae_mean": metrics.get("mae_mean", 0.0),
-                "mae_std": metrics.get("mae_std", 0.0),
-                "pearson_mean": metrics.get("pearson_mean", 0.0),
-                "pearson_std": metrics.get("pearson_std", 0.0),
-            }
-            results_rows.append(row)
+                excel_path = results_dir / "metrics.xlsx"
 
-            with open(config_dir / "summary.json", "w", encoding="utf-8") as f:
-                json.dump(row, f, ensure_ascii=False, indent=2)
+                all_results = to_excel_optimized_OLP(
+                    file_name=str(excel_path),
+                    n_iter=N_ITER,
+                    X_train=data.X_train,
+                    y_train=data.y_train,
+                    X_valid=data.X_valid,
+                    y_valid=data.y_valid,
+                    X_test=data.X_test,
+                    y_test=data.y_test,
+                    batch_size=BATCH_SIZE,
+                    input_dim=data.n_features,
+                    output_dim=data.n_targets,
+                    learning_rate=LEARNING_RATE,
+                    num_epochs=NUM_EPOCHS,
+                    patience=PATIENCE,
+                    hidden_dim=HIDDEN_DIM,
+                    save_plots_dir=str(curves_dir),
+                    save_models_dir=str(models_dir),
+                    optimizer_type=OPTIMIZER,
+                    momentum=MOMENTUM,
+                    tolerance=TOLERANCE,
+                    tolerance_mode=TOLERANCE_MODE,
+                    random_state=RANDOM_STATE,
+                    device=DEVICE,
+                    log_file=str(logs_dir / "training.log"),
+                    enable_cv=ENABLE_CV,
+                )
 
-            print(
-                f"[OK] {config_name}: "
-                f"R2={row['r2_mean']:.4f}±{row['r2_std']:.4f}, "
-                f"MSE={row['mse_mean']:.4f}±{row['mse_std']:.4f}, "
-                f"time={total_time:.1f}s"
-            )
+                total_time = time.time() - start_time
+                metrics = _extract_metrics_from_all_results(all_results)
+
+                row = {
+                    "experiment_type": "kernel_pca",
+                    "experiment_id": config_name,
+                    "difficulty": difficulty,
+                    "target": ",".join(TARGET_COLUMNS),
+                    "kernel": "rbf",
+                    "gamma": gamma,
+                    "n_components": n_components,
+                    "n_features": n_components,
+                    "original_n_features": len(feature_cols),
+                    "compression_ratio": len(feature_cols) / n_components,
+                    "n_samples_train": len(train_model),
+                    "n_samples_valid": len(valid_model),
+                    "n_samples_test": len(test_model),
+                    "n_iter": N_ITER,
+                    "num_epochs": NUM_EPOCHS,
+                    "learning_rate": LEARNING_RATE,
+                    "optimizer": OPTIMIZER,
+                    "momentum": MOMENTUM,
+                    "patience": PATIENCE,
+                    "tolerance": TOLERANCE,
+                    "tolerance_mode": TOLERANCE_MODE,
+                    "hidden_dim": HIDDEN_DIM,
+                    "batch_size": BATCH_SIZE,
+                    "device": DEVICE,
+                    "total_time_seconds": total_time,
+                    "r2_mean": metrics.get("r2_mean", 0.0),
+                    "r2_std": metrics.get("r2_std", 0.0),
+                    "mse_mean": metrics.get("mse_mean", 0.0),
+                    "mse_std": metrics.get("mse_std", 0.0),
+                    "mae_mean": metrics.get("mae_mean", 0.0),
+                    "mae_std": metrics.get("mae_std", 0.0),
+                    "pearson_mean": metrics.get("pearson_mean", 0.0),
+                    "pearson_std": metrics.get("pearson_std", 0.0),
+                }
+                results_rows.append(row)
+
+                with open(config_dir / "summary.json", "w", encoding="utf-8") as f:
+                    json.dump(row, f, ensure_ascii=False, indent=2)
+
+                print(
+                    f"[OK] {difficulty}/{config_name}: "
+                    f"R2={row['r2_mean']:.4f}±{row['r2_std']:.4f}, "
+                    f"MSE={row['mse_mean']:.4f}±{row['mse_std']:.4f}, "
+                    f"time={total_time:.1f}s"
+                )
 
     # 5) Сводка по всем конфигурациям + графики сравнения
-    results_df = pd.DataFrame(results_rows).sort_values(["gamma", "n_components"])
+    if not results_rows:
+        print("\n[WARN] Нет ни одной обученной конфигурации. Проверьте наличие precomputed CSV в Data/KernelPCA")
+        return
+
+    results_df = pd.DataFrame(results_rows).sort_values(["difficulty", "gamma", "n_components"])
     results_df.to_csv(EXPERIMENT_BASE_DIR / "all_results.csv", index=False)
 
-    plot_pca_comparison(
-        results_df.to_dict("records"),
-        metric="r2_mean",
-        save_path=plots_dir / "r2_vs_components.png",
-    )
-    plot_pca_comparison(
-        results_df.to_dict("records"),
-        metric="mse_mean",
-        save_path=plots_dir / "mse_vs_components.png",
-    )
+    for difficulty in results_df["difficulty"].unique():
+        df_diff = results_df[results_df["difficulty"] == difficulty].copy()
+        for gamma in KPCA_GAMMAS:
+            df_plot = df_diff[df_diff["gamma"] == gamma].copy().sort_values("n_components")
+            if df_plot.empty:
+                continue
 
-    plot_feature_count_vs_time(
-        results_df,
-        feature_col="n_components",
-        time_col="total_time_seconds",
-        save_path=plots_dir / "training_time_vs_components.png",
-        xlabel="Количество компонент",
-        title="Время обучения vs количество Kernel PCA компонент",
-    )
+            plot_pca_comparison(
+                df_plot.to_dict("records"),
+                metric="r2_mean",
+                save_path=plots_dir / f"r2_vs_components_{difficulty}_gamma{gamma}.png",
+            )
+            plot_pca_comparison(
+                df_plot.to_dict("records"),
+                metric="mse_mean",
+                save_path=plots_dir / f"mse_vs_components_{difficulty}_gamma{gamma}.png",
+            )
 
-    plot_relative_training_time(
-        results_df,
-        feature_col="n_components",
-        time_col="total_time_seconds",
-        reference_feature_count=max(N_COMPONENTS_LIST),
-        save_path=plots_dir / "relative_training_time_vs_components.png",
-        xlabel="Количество компонент",
-        title="Относительное время обучения vs количество Kernel PCA компонент",
-    )
+            plot_feature_count_vs_time(
+                df_plot,
+                feature_col="n_components",
+                time_col="total_time_seconds",
+                save_path=plots_dir / f"training_time_vs_components_{difficulty}_gamma{gamma}.png",
+                xlabel="Количество компонент",
+                title=f"Время обучения vs компоненты | {difficulty} | gamma={gamma}",
+            )
+
+            plot_relative_training_time(
+                df_plot,
+                feature_col="n_components",
+                time_col="total_time_seconds",
+                reference_feature_count=max(N_COMPONENTS_LIST),
+                save_path=plots_dir / f"relative_training_time_vs_components_{difficulty}_gamma{gamma}.png",
+                xlabel="Количество компонент",
+                title=f"Относительное время vs компоненты | {difficulty} | gamma={gamma}",
+            )
 
     best_idx = results_df["r2_mean"].idxmax()
     best = results_df.loc[best_idx]
@@ -454,9 +497,10 @@ def main():
     print("DONE")
     print("=" * 80)
     print(f"Experiment dir: {EXPERIMENT_BASE_DIR}")
-    print(f"KernelPCA data dir: {transformed_base}")
+    print(f"KernelPCA data dir: {KERNEL_PCA_DATA_ROOT}")
     print(
-        f"Best config: n_components={int(best['n_components'])}, "
+        f"Best config: difficulty={best['difficulty']}, gamma={best['gamma']}, "
+        f"n_components={int(best['n_components'])}, "
         f"R2={best['r2_mean']:.4f}±{best['r2_std']:.4f}, "
         f"compression={best['compression_ratio']:.1f}x"
     )
