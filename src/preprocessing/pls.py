@@ -65,6 +65,7 @@ class PLSTransformer:
     def get_info(self) -> Dict:
         return {
             'n_components': self.n_components_used,
+            'total_variance_explained': float(self.cumulative_variance[-1]) if self.cumulative_variance is not None else None,
             'explained_variance_ratio': self.explained_variance_ratio.tolist() if self.explained_variance_ratio is not None else None,
             'cumulative_variance': self.cumulative_variance.tolist() if self.cumulative_variance is not None else None,
         }
