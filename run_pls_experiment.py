@@ -108,10 +108,10 @@ def main():
     print("\n" + "=" * 60)
     print("BEST RESULT")
     print("=" * 60)
-    print(f"n_components: {best['n_components']}")
-    print(f"variance_explained: {best.get('variance_explained', 'N/A')}")
-    print(f"R2 = {best['r2_mean']:.4f} +/- {best['r2_std']:.4f}")
-    print(f"Compression: {best['compression_ratio']:.1f}x")
+    print(f"n_components: {best.n_components}")
+    print(f"variance_explained: {best.variance_explained}")
+    print(f"R2 = {best.r2_mean:.4f} +/- {best.r2_std:.4f}")
+    print(f"Compression: {best.compression_ratio:.1f}x")
 
     results.to_csv(EXPERIMENTS_DIR / EXPERIMENT_NAME / "all_results.csv", index=False)
 

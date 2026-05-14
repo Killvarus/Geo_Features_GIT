@@ -289,7 +289,7 @@ class PLSExperiment:
     def get_best_result(self, metric: str = 'r2_mean') -> Dict:
         if not self.results:
             return None
-        return max(self.results, key=lambda x: x.get(metric, 0))
+        return max(self.results, key=lambda x: getattr(x, metric, 0))
 
     def summary(self) -> str:
         df = self.get_results_df()
@@ -303,8 +303,8 @@ Original features: {self.original_n_features}
 Tests run: {len(df)}
 
 Best result:
-  n_components: {best['n_components']}
-  variance_explained: {best.get('variance_explained', 'N/A')}
-  R2 = {best['r2_mean']:.4f} +/- {best['r2_std']:.4f}
-  Compression: {best['compression_ratio']:.1f}x
+  n_components: {best.n_components}
+  variance_explained: {best.variance_explained}
+  R2 = {best.r2_mean:.4f} +/- {best.r2_std:.4f}
+  Compression: {best.compression_ratio:.1f}x
 """
