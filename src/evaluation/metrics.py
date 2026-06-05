@@ -300,6 +300,7 @@ def plot_feature_count_vs_time(
     results_df: pd.DataFrame,
     feature_col: str = 'n_features',
     time_col: str = 'total_time_seconds',
+    time_std_col: str = 'total_time_std',
     save_path: Optional[Path] = None,
     figsize: Tuple[int, int] = (10, 6),
     xlabel: str = 'Количество признаков',
@@ -310,7 +311,12 @@ def plot_feature_count_vs_time(
         print(f"Колонки {feature_col} и/или {time_col} не найдены")
         return None
 
-    plot_df = results_df[[feature_col, time_col]].dropna().copy()
+    cols = [feature_col, time_col]
+    has_std = time_std_col in results_df.columns
+    if has_std:
+        cols.append(time_std_col)
+
+    plot_df = results_df[cols].dropna().copy()
     if plot_df.empty:
         print("Нет данных для построения графика времени обучения")
         return None
@@ -318,15 +324,20 @@ def plot_feature_count_vs_time(
     plot_df = plot_df.sort_values(feature_col)
 
     fig, ax = plt.subplots(figsize=figsize)
-    ax.plot(plot_df[feature_col], plot_df[time_col], marker='o', linewidth=2)
-    ax.scatter(plot_df[feature_col], plot_df[time_col], s=80, alpha=0.8)
+    yerr = plot_df[time_std_col] if has_std else None
+    ax.errorbar(plot_df[feature_col], plot_df[time_col], yerr=yerr,
+                marker='o', linewidth=2, capsize=5, capthick=1.5)
+    ax.scatter(plot_df[feature_col], plot_df[time_col], s=80, alpha=0.8, zorder=5)
 
     for _, row in plot_df.iterrows():
+        label = f"{row[time_col]:.1f}s"
+        if has_std and row[time_std_col] > 0:
+            label += f"±{row[time_std_col]:.1f}s"
         ax.annotate(
-            f"{row[time_col]:.1f}s",
+            label,
             (row[feature_col], row[time_col]),
             textcoords='offset points',
-            xytext=(0, 8),
+            xytext=(0, 12),
             ha='center',
             fontsize=8,
             alpha=0.7,

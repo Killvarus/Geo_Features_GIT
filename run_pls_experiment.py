@@ -1,18 +1,34 @@
 """
 Запуск эксперимента с PLS (Partial Least Squares) для всех уровней сложности.
 
+PLS — САМОСТОЯТЕЛЬНЫЙ регрессионный метод. Нейросеть не используется.
+
+Параметры:
+  Данные:       Data/ (3 сложности)
+  Таргет:       H3_8
+  Компоненты:   2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048
+
 Структура результатов:
 experiments/pls_all_difficulties_H3_8/
+  all_results.csv                     — сводная таблица всех запусков
   Difficult_1/
-    pls_16/
-      results/metrics.xlsx
-      learning_curves/
-      models/
-      summary.json
-  Difficult_2/
-    ...
-  all_results.csv
-  plots/
+    logs/experiment.log               — лог эксперимента
+    plots/
+      r2_mean_vs_components.png       — R² vs компоненты
+      mse_mean_vs_components.png      — MSE vs компоненты
+      training_time_vs_components.png — время обучения
+      relative_training_time_vs_components.png — относительное время
+    pls_2/
+      summary.json                    — ExperimentResult
+      predictions/
+        test_predictions.csv          — предсказания на тесте
+        valid_predictions.csv         — предсказания на валидации
+    pls_4/ ...
+  Difficult_2/ ...
+  Difficult_3/ ...
+
+Запуск:
+  python run_pls_experiment.py
 """
 import sys
 from pathlib import Path
@@ -39,23 +55,9 @@ DIFFICULTY_TO_FILES = {
 TARGET_COLUMNS = ["H3_8"]
 EXPERIMENT_NAME = "pls_all_difficulties_H3_8"
 
-N_COMPONENTS_LIST = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048]
+N_COMPONENTS_LIST = [16, 64, 256, 1024, 1536, 2048]
 
-USE_PRECOMPUTED_PLS = True
-PRECOMPUTED_PLS_ROOT = DATA_DIR / "PLS"
-
-N_ITER = 3
-NUM_EPOCHS = 1000
-LEARNING_RATE = 0.01
-OPTIMIZER = "adam"
-PATIENCE = 250
-TOLERANCE = 0.003
-TOLERANCE_MODE = "relative"
-HIDDEN_DIM = 32
-BATCH_SIZE = 64
-DEVICE = "auto"
-ENABLE_CV = False
-
+# PLS не использует нейросеть — параметры ниже не нужны
 
 # =============================================================================
 # ЗАПУСК
@@ -92,8 +94,6 @@ def main():
         train, valid, test = load_mtz_data(train_path, valid_path, test_path)
         print(f"  Train: {train.shape}, Valid: {valid.shape}, Test: {test.shape}")
 
-        precomputed_root = PRECOMPUTED_PLS_ROOT / difficulty if USE_PRECOMPUTED_PLS else None
-
         experiment = PLSExperiment(
             train=train,
             valid=valid,
@@ -105,18 +105,6 @@ def main():
 
         results = experiment.run_grid(
             n_components_list=N_COMPONENTS_LIST,
-            n_iter=N_ITER,
-            num_epochs=NUM_EPOCHS,
-            learning_rate=LEARNING_RATE,
-            optimizer=OPTIMIZER,
-            patience=PATIENCE,
-            tolerance=TOLERANCE,
-            tolerance_mode=TOLERANCE_MODE,
-            hidden_dim=HIDDEN_DIM,
-            batch_size=BATCH_SIZE,
-            device=DEVICE,
-            enable_cv=ENABLE_CV,
-            precomputed_pls_root=str(precomputed_root) if precomputed_root else None,
         )
 
         # Добавляем difficulty в результаты

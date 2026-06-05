@@ -67,6 +67,7 @@ class ExperimentResult:
 
     # Время выполнения
     total_time_seconds: float = 0.0
+    total_time_std: float = 0.0
 
     # Дополнительные данные
     all_iterations_data: Optional[Dict] = None
