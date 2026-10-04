@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from ..evaluation.experiment import ExperimentResult, extract_metrics_from_excel
+from ..evaluation.experiment import ExperimentResult, extract_metrics_from_excel, load_experiment_result
 from ..evaluation.metrics import plot_feature_count_vs_time, plot_relative_training_time
 from ..preprocessing.pca import (
     PCATransformer,
@@ -63,7 +63,7 @@ class PCAExperiment:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         
         # Результаты
-        self.results: List[Dict] = []
+        self.results: List[ExperimentResult] = []
         self.transformers: Dict[int, PCATransformer] = {}
         self.logger = setup_logger(f'pca.{self.experiment_name}', self.base_dir / 'logs' / 'experiment.log')
         
@@ -92,6 +92,12 @@ class PCAExperiment:
             n_components: количество главных компонент (None = все)
         """
         config_name = f"pca_{n_components}" if n_components else "pca_all"
+        existing = load_experiment_result(self.base_dir / config_name / "summary.json")
+        if existing is not None and not kwargs.get('force_rerun'):
+            self.logger.info("Skip existing PCA config | config=%s", config_name)
+            self.results.append(existing)
+            return existing
+
         self.logger.info("PCA run started | config=%s | requested_n_components=%s | save_transformed_data=%s", config_name, n_components, save_transformed_data)
         
         precomputed_root = kwargs.get('precomputed_pca_root')
@@ -400,11 +406,12 @@ class PCAExperiment:
 
         return fig
     
-    def get_best_result(self, metric: str = 'r2_mean') -> Dict:
-        """Получение лучшего результата по метрике."""
+    def get_best_result(self, metric: str = 'r2_mean') -> Optional[Dict]:
+        """Лучший результат по метрике. Возвращает dict, как ждут раннеры."""
         if not self.results:
             return None
-        return max(self.results, key=lambda x: x.get(metric, 0))
+        best = max(self.results, key=lambda x: getattr(x, metric, 0))
+        return best.to_dict()
     
     def summary(self) -> str:
         """Краткая сводка результатов."""

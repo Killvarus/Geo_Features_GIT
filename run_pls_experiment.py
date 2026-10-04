@@ -1,31 +1,7 @@
 """
-Запуск эксперимента с PLS (Partial Least Squares) для всех уровней сложности.
+Запуск PLS (самостоятельный регрессор, без нейросети) для всех данных и таргетов.
 
-PLS — САМОСТОЯТЕЛЬНЫЙ регрессионный метод. Нейросеть не используется.
-
-Параметры:
-  Данные:       Data/ (3 сложности)
-  Таргет:       H3_8
-  Компоненты:   2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048
-
-Структура результатов:
-experiments/pls_all_difficulties_H3_8/
-  all_results.csv                     — сводная таблица всех запусков
-  Difficult_1/
-    logs/experiment.log               — лог эксперимента
-    plots/
-      r2_mean_vs_components.png       — R² vs компоненты
-      mse_mean_vs_components.png      — MSE vs компоненты
-      training_time_vs_components.png — время обучения
-      relative_training_time_vs_components.png — относительное время
-    pls_2/
-      summary.json                    — ExperimentResult
-      predictions/
-        test_predictions.csv          — предсказания на тесте
-        valid_predictions.csv         — предсказания на валидации
-    pls_4/ ...
-  Difficult_2/ ...
-  Difficult_3/ ...
+Порядок как у aggregation/PCA: сначала H3_8 на всех датасетах, потом H1_8, потом H2_8.
 
 Запуск:
   python run_pls_experiment.py
@@ -33,17 +9,22 @@ experiments/pls_all_difficulties_H3_8/
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).parent))
+
+import matplotlib
+matplotlib.use('Agg')
 
 from src.config import PROJECT_ROOT, EXPERIMENTS_DIR
 from src.experiment import PLSExperiment
 from src.utils import load_mtz_data
+from src.utils.logging_utils import configure_stdio, install_safe_print, close_logger_file_handlers
 
-# =============================================================================
-# КОНФИГУРАЦИЯ
-# =============================================================================
 
 DATA_DIR = PROJECT_ROOT / "Data"
+RUN_TAG = "2026-09-04_pls"
+EXPERIMENTS_BASE_DIR = EXPERIMENTS_DIR / RUN_TAG
 
 DIFFICULTIES = ["Difficult_1", "Difficult_2", "Difficult_3"]
 DIFFICULTY_TO_FILES = {
@@ -51,94 +32,170 @@ DIFFICULTY_TO_FILES = {
     "Difficult_2": ("train_3.csv", "valid_3.csv", "test_3.csv"),
     "Difficult_3": ("train_3_1.csv", "valid_3_1.csv", "test_3_1.csv"),
 }
+DIFFICULTY_TO_SHORT = {
+    "Difficult_1": "old",
+    "Difficult_2": "train3",
+    "Difficult_3": "train3_1",
+}
 
-TARGET_COLUMNS = ["H3_8"]
-EXPERIMENT_NAME = "pls_all_difficulties_H3_8"
+TARGET_COLUMNS = ["H3_8", "H1_8", "H2_8"]
+N_COMPONENTS_LIST = [16, 64, 256, 512, 1024, 1536, 2048]
 
-N_COMPONENTS_LIST = [16, 64, 256, 1024, 1536, 2048]
 
-# PLS не использует нейросеть — параметры ниже не нужны
+def _jobs():
+    jobs = []
+    for target in TARGET_COLUMNS:
+        for difficulty in DIFFICULTIES:
+            short = DIFFICULTY_TO_SHORT[difficulty]
+            jobs.append({
+                "name": f"pls_{short}_{target}",
+                "difficulty": difficulty,
+                "target": target,
+                "data": DIFFICULTY_TO_FILES[difficulty],
+            })
+    return jobs
 
-# =============================================================================
-# ЗАПУСК
-# =============================================================================
+
+EXPERIMENTS = _jobs()
+
+
+def run_one(train, valid, test, target, exp_name):
+    print(f"\n{'=' * 60}")
+    print(f"PLS: {exp_name} (target={target})")
+    print(f"{'=' * 60}")
+
+    experiment = PLSExperiment(
+        train=train,
+        valid=valid,
+        test=test,
+        target_columns=[target],
+        experiment_name=exp_name,
+        base_dir=EXPERIMENTS_BASE_DIR / exp_name,
+    )
+
+    results = experiment.run_grid(n_components_list=N_COMPONENTS_LIST)
+    if results.empty:
+        print(f"  [X] No PLS results for {exp_name}")
+        close_logger_file_handlers(experiment.logger)
+        return None
+
+    experiment.plot_comparison(metric="r2_mean", save=True)
+    experiment.plot_comparison(metric="mse_mean", save=True)
+    results.to_csv(EXPERIMENTS_BASE_DIR / exp_name / "all_results.csv", index=False)
+
+    best = experiment.get_best_result()
+    if best:
+        print(
+            f"  Best: n={best['n_components']}, "
+            f"R2={best['r2_mean']:.4f} +/- {best['r2_std']:.4f}"
+        )
+    print(f"[OK] PLS {exp_name} done")
+    close_logger_file_handlers(experiment.logger)
+    return experiment
+
 
 def main():
-    print("=" * 60)
-    print("PLS EXPERIMENT — ALL DIFFICULTIES")
-    print("=" * 60)
-    print(f"Difficulties: {DIFFICULTIES}")
-    print(f"Targets: {TARGET_COLUMNS}")
+    configure_stdio()
+    install_safe_print()
+    EXPERIMENTS_BASE_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 70)
+    print("PLS EXPERIMENT")
+    print("=" * 70)
+    print(f"Results: {EXPERIMENTS_BASE_DIR}")
+    print(f"Jobs: {len(EXPERIMENTS)}")
     print(f"Components: {N_COMPONENTS_LIST}")
+    print(f"Targets: {TARGET_COLUMNS}")
+    print("Order: all H3_8, then H1_8, then H2_8")
+    print("=" * 70)
 
-    experiment_base = EXPERIMENTS_DIR / EXPERIMENT_NAME
-    experiment_base.mkdir(parents=True, exist_ok=True)
+    completed = 0
+    failed = 0
+    all_rows = []
 
-    all_results = []
+    for i, exp in enumerate(EXPERIMENTS, 1):
+        exp_name = exp["name"]
+        train_file, valid_file, test_file = exp["data"]
+        target = exp["target"]
+        difficulty = exp["difficulty"]
+        exp_out = EXPERIMENTS_BASE_DIR / exp_name
 
-    for difficulty in DIFFICULTIES:
-        train_file, valid_file, test_file = DIFFICULTY_TO_FILES[difficulty]
+        print(f"\n[{i}/{len(EXPERIMENTS)}] {exp_name}")
+
+        csv_path = exp_out / "all_results.csv"
+        if csv_path.exists():
+            print(f"  [SKIP] results already exist: {csv_path}")
+            completed += 1
+            try:
+                df = pd.read_csv(csv_path)
+                df["difficulty"] = difficulty
+                df["job"] = exp_name
+                all_rows.extend(df.to_dict("records"))
+            except (OSError, ValueError) as e:
+                print(f"  [WARN] could not read existing csv: {e}")
+            continue
+
         train_path = DATA_DIR / train_file
         valid_path = DATA_DIR / valid_file
         test_path = DATA_DIR / test_file
-
-        print("\n" + "#" * 60)
-        print(f"DIFFICULTY: {difficulty}")
-        print("#" * 60)
-
         if not train_path.exists():
-            print(f"  [SKIP] Data not found: {train_path}")
+            print(f"  [X] Missing file: {train_path}")
+            failed += 1
             continue
 
-        print("  Loading data...")
-        train, valid, test = load_mtz_data(train_path, valid_path, test_path)
-        print(f"  Train: {train.shape}, Valid: {valid.shape}, Test: {test.shape}")
+        try:
+            train, valid, test = load_mtz_data(train_path, valid_path, test_path, verbose=False)
+            print(f"  Data: train={len(train)}, valid={len(valid)}, test={len(test)}")
+            experiment = run_one(train, valid, test, target, exp_name)
+            if experiment is None:
+                failed += 1
+                continue
+            results = experiment.get_results_df()
+            for row in results.to_dict("records"):
+                row["difficulty"] = difficulty
+                row["job"] = exp_name
+                all_rows.append(row)
+            completed += 1
+        except Exception as e:
+            print(f"  [X] Error: {e}")
+            failed += 1
 
-        experiment = PLSExperiment(
-            train=train,
-            valid=valid,
-            test=test,
-            target_columns=TARGET_COLUMNS,
-            experiment_name=EXPERIMENT_NAME,
-            base_dir=experiment_base / difficulty,
-        )
+    summary_lines = [
+        f"Total jobs: {len(EXPERIMENTS)}",
+        f"Completed: {completed}",
+        f"Failed: {failed}",
+        "",
+    ]
+    for target in TARGET_COLUMNS:
+        summary_lines.append(f"=== {target} ===")
+        for exp in EXPERIMENTS:
+            if exp["target"] == target:
+                summary_lines.append(f"  {exp['name']}")
 
-        results = experiment.run_grid(
-            n_components_list=N_COMPONENTS_LIST,
-        )
+    summary_path = EXPERIMENTS_BASE_DIR / "all_experiments_summary.txt"
+    summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 
-        # Добавляем difficulty в результаты
-        for r in results.to_dict("records"):
-            r["difficulty"] = difficulty
-            all_results.append(r)
+    if all_rows:
+        df_all = pd.DataFrame(all_rows)
+        df_all.to_csv(EXPERIMENTS_BASE_DIR / "all_results.csv", index=False)
+        print(f"\nSaved: {EXPERIMENTS_BASE_DIR / 'all_results.csv'}")
+        if "r2_mean" in df_all.columns and not df_all["r2_mean"].isna().all():
+            best_idx = df_all["r2_mean"].idxmax()
+            best = df_all.loc[best_idx]
+            print("\n" + "=" * 60)
+            print("OVERALL BEST")
+            print("=" * 60)
+            print(f"Job: {best.get('job')}")
+            print(f"Difficulty: {best.get('difficulty')}")
+            print(f"n_components: {int(best['n_components'])}")
+            print(f"R2 = {best['r2_mean']:.4f} +/- {best['r2_std']:.4f}")
 
-        # Графики для этой сложности
-        experiment.plot_comparison(metric="r2_mean", save=True)
-        experiment.plot_comparison(metric="mse_mean", save=True)
-
-        best = experiment.get_best_result()
-        print(f"  Best: n={best.n_components}, R²={best.r2_mean:.4f} ± {best.r2_std:.4f}")
-
-    # Сохраняем общий CSV
-    import pandas as pd
-    df_all = pd.DataFrame(all_results)
-    df_all.to_csv(experiment_base / "all_results.csv", index=False)
-    print(f"\nSaved: {experiment_base / 'all_results.csv'}")
-
-    # Итог
-    if not df_all.empty:
-        best_idx = df_all["r2_mean"].idxmax()
-        best = df_all.loc[best_idx]
-        print("\n" + "=" * 60)
-        print("OVERALL BEST")
-        print("=" * 60)
-        print(f"Difficulty: {best['difficulty']}")
-        print(f"n_components: {int(best['n_components'])}")
-        print(f"R² = {best['r2_mean']:.4f} ± {best['r2_std']:.4f}")
-
-    print("\n" + "=" * 60)
-    print("COMPLETED")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print("PLS COMPLETED")
+    print("=" * 70)
+    print(f"Completed: {completed}")
+    print(f"Failed: {failed}")
+    print(f"Summary: {summary_path}")
 
 
 if __name__ == "__main__":

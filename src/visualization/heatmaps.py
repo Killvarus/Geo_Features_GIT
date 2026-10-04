@@ -70,7 +70,7 @@ def parse_feature(
     df_parsed = pd.DataFrame(parsed_data)
     
     if df_parsed.empty:
-        print("⚠️ Нет данных для визуализации")
+        print("[WARN] No data for visualization")
         return None
     
     components = sorted(df_parsed['component'].unique())
@@ -138,7 +138,7 @@ def parse_feature(
     
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        print(f"✅ Тепловая карта сохранена: {save_path}")
+        print(f"[OK] Heatmap saved: {save_path}")
     
     return fig
 
@@ -168,7 +168,7 @@ def plot_feature_importance_heatmap(
     ])
     
     if df.empty:
-        print("⚠️ Нет данных для визуализации")
+        print("[WARN] No data for visualization")
         return None
     
     # Автоматический vmax

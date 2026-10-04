@@ -6,7 +6,7 @@
 - пытается загрузить результаты (summary.json или fallback из metrics.xlsx)
 - определяет тип эксперимента (aggregation / pca)
 - строит только те графики, которых ещё нет
-- для каждого config с моделью и без learning curve восстанавливает кривую обучения из logs/training.log
+- при отсутствии PNG кривой перерисовывает её из learning_history_iter_*.json (полный ряд эпох, не лог)
 
 Запуск:
     python plot_missing_graphs.py
@@ -14,13 +14,11 @@
 """
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 from typing import Dict, List
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -116,81 +114,30 @@ def _build_missing_pca_plots(exp_dir: Path, df: pd.DataFrame) -> int:
     return created
 
 
-def _parse_training_log(log_path: Path) -> Dict[int, Dict[str, List[float]]]:
-    """Парсит logs/training.log и вытаскивает train/val loss по итерациям."""
-    data: Dict[int, Dict[str, List[float]]] = {}
-    current_iter = None
-
-    re_iter = re.compile(r'Iteration\s+(\d+)/(\d+)\s+started')
-    re_epoch = re.compile(r'Epoch\s+(\d+)\s+\|\s+train=([0-9eE+\-.]+)\s+\|\s+val=([0-9eE+\-.]+)')
-
-    for raw_line in log_path.read_text(encoding='utf-8', errors='ignore').splitlines():
-        m_iter = re_iter.search(raw_line)
-        if m_iter:
-            current_iter = int(m_iter.group(1))
-            data.setdefault(current_iter, {'train': [], 'val': []})
-            continue
-
-        m_epoch = re_epoch.search(raw_line)
-        if m_epoch and current_iter is not None:
-            train_val = float(m_epoch.group(2))
-            val_val = float(m_epoch.group(3))
-            data[current_iter]['train'].append(train_val)
-            data[current_iter]['val'].append(val_val)
-
-    return data
-
-
-def _plot_learning_curve_from_log(log_path: Path, out_path: Path):
-    parsed = _parse_training_log(log_path)
-    if not parsed:
-        return False
-
-    # Берём первую итерацию, если нет конкретной
-    first_iter = sorted(parsed.keys())[0]
-    train_losses = parsed[first_iter]['train']
-    val_losses = parsed[first_iter]['val']
-
-    if not train_losses or not val_losses:
-        return False
-
-    _ensure_dir(out_path.parent)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    epochs = np.arange(1, min(len(train_losses), len(val_losses)) + 1)
-    ax.plot(epochs, train_losses[:len(epochs)], label='Train Loss', linewidth=2)
-    ax.plot(epochs, val_losses[:len(epochs)], label='Val Loss', linewidth=2)
-    ax.set_xlabel('Эпохи')
-    ax.set_ylabel('MSE Loss')
-    ax.set_title('Learning Curve (restored from log)')
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    return True
-
-
 def _restore_missing_learning_curves(exp_dir: Path) -> int:
+    """Достраивает PNG только из learning_history_iter_*.json (полный ряд эпох).
+
+    Из training.log кривые больше не собираются: там каждая 100-я эпоха и чужие прогоны.
+    """
+    from src.models.neural_network import plot_learning_curve_from_history
+
     created = 0
     for config_dir in [p for p in exp_dir.iterdir() if p.is_dir()]:
-        models_dir = config_dir / 'models'
         curves_dir = config_dir / 'learning_curves'
-        log_path = config_dir / 'logs' / 'training.log'
-
-        if not models_dir.exists() or not log_path.exists():
+        if not curves_dir.exists():
             continue
 
-        model_files = sorted(models_dir.glob('olp_iter_*.pt'))
-        if not model_files:
-            continue
-
-        expected_curve = curves_dir / 'learning_curve_iter_1.png'
-        if expected_curve.exists():
-            continue
-
-        ok = _plot_learning_curve_from_log(log_path, expected_curve)
-        if ok:
-            created += 1
+        for history_path in sorted(curves_dir.glob('learning_history_iter_*.json')):
+            out_path = history_path.with_name(
+                history_path.name.replace('learning_history', 'learning_curve').replace('.json', '.png')
+            )
+            if out_path.exists():
+                continue
+            try:
+                plot_learning_curve_from_history(history_path, out_path)
+                created += 1
+            except Exception as e:
+                print(f"[WARN] не удалось восстановить кривую из {history_path}: {e}")
 
     return created
 
@@ -225,7 +172,7 @@ def process_experiment(exp_dir: Path) -> Dict[str, int]:
         elif _is_pca_df(df):
             stats['created'] += _build_missing_pca_plots(exp_dir, df)
 
-        # Восстановление learning curves из логов, если модель есть, а кривой нет
+        # Перерисовать пропавшие PNG из JSON-истории (не из training.log)
         stats['created'] += _restore_missing_learning_curves(exp_dir)
 
     except Exception as e:

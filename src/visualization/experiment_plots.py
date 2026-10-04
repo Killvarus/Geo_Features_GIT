@@ -98,6 +98,10 @@ def load_all_summaries(experiment_dir: Path) -> pd.DataFrame:
                     'experiment_type': 'pca',
                     'n_components': None,
                 })
+        elif config_name.startswith('wavelet'):
+            row['experiment_type'] = 'wavelet'
+        elif config_name.startswith('pls_'):
+            row['experiment_type'] = 'pls'
         else:
             row['experiment_type'] = 'unknown'
 

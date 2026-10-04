@@ -3,6 +3,8 @@
 !.gitignore
 !*.py
 !*.ipynb
+!*.md
+!requirements.txt
 
 __pycache__/
 *.pyc

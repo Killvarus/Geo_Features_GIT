@@ -48,6 +48,10 @@ class ExperimentResult:
     original_n_features: Optional[int] = None
     variance_explained: Optional[float] = None
     compression_ratio: Optional[float] = None
+    wavelet: Optional[str] = None
+    wavelet_level: Optional[int] = None
+    wavelet_keep: Optional[str] = None
+    wavelet_layout: Optional[str] = None
 
     n_features: int = 0
     n_samples_train: int = 0
@@ -79,6 +83,15 @@ class ExperimentResult:
     def from_dict(cls, d: Dict) -> 'ExperimentResult':
         valid_keys = cls.__dataclass_fields__.keys()
         return cls(**{k: v for k, v in d.items() if k in valid_keys})
+
+
+def load_experiment_result(summary_path: Path) -> Optional['ExperimentResult']:
+    """Читает уже сохранённый summary.json, если конфиг уже посчитан."""
+    summary_path = Path(summary_path)
+    if not summary_path.exists():
+        return None
+    with open(summary_path, 'r', encoding='utf-8') as f:
+        return ExperimentResult.from_dict(json.load(f))
 
 
 # =============================================================================
@@ -119,7 +132,10 @@ class ExperimentManager:
         exp_dir = self.base_dir / name
 
         if exp_dir.exists():
-            print(f"[!] Эксперимент '{name}' уже существует")
+            try:
+                print(f"[!] Experiment already exists: {name}")
+            except (OSError, ValueError):
+                pass
         else:
             exp_dir.mkdir(parents=True)
 
@@ -137,8 +153,11 @@ class ExperimentManager:
         with open(exp_dir / "config.json", 'w', encoding='utf-8') as f:
             json.dump(config_data, f, indent=2, ensure_ascii=False)
 
-        print(f"[OK] Создан эксперимент: {name}")
-        print(f"   Директория: {exp_dir}")
+        try:
+            print(f"[OK] Created experiment: {name}")
+            print(f"   Directory: {exp_dir}")
+        except (OSError, ValueError):
+            pass
 
         return exp_dir
 
@@ -164,7 +183,10 @@ class ExperimentManager:
         self._results_cache[experiment_name] = result
         self._update_all_experiments_table()
 
-        print(f"[OK] Результаты сохранены: {summary_path}")
+        try:
+            print(f"[OK] Results saved: {summary_path}")
+        except (OSError, ValueError):
+            pass
 
     def save_aggregated_data(
         self,
@@ -181,7 +203,10 @@ class ExperimentManager:
         valid.to_csv(agg_dir / "valid.csv", index=False)
         test.to_csv(agg_dir / "test.csv", index=False)
 
-        print(f"[OK] Агрегированные данные сохранены: {agg_dir}")
+        try:
+            print(f"[OK] Aggregated data saved: {agg_dir}")
+        except (OSError, ValueError):
+            pass
 
     def load_result(self, experiment_name: str) -> Optional[ExperimentResult]:
         """Загрузка результатов эксперимента."""
@@ -271,7 +296,10 @@ class ExperimentManager:
                 }).round(4)
                 agg_summary.to_excel(writer, sheet_name='By_Aggregation')
 
-        print(f"[OK] Данные экспортированы в: {output_path}")
+        try:
+            print(f"[OK] Data exported: {output_path}")
+        except (OSError, ValueError):
+            pass
 
 
 # =============================================================================
