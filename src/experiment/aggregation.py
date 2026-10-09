@@ -18,7 +18,7 @@ from ..evaluation.metrics import (
     plot_metric_vs_aggregation,
     plot_relative_training_time,
 )
-from ..evaluation.experiment import extract_metrics_from_excel
+from ..evaluation.experiment import extract_metrics_from_excel, load_experiment_result
 from ..utils.logging_utils import setup_logger
 
 
@@ -129,6 +129,12 @@ class AggregationExperiment:
             tolerance_mode: режим tolerance ('relative' или 'absolute')
         """
         config_name = f"freq{freq_step}_pickup{pickup_step}_{agg_method}"
+        existing = load_experiment_result(self.base_dir / config_name / "summary.json")
+        if existing is not None and not kwargs.get('force_rerun'):
+            self.logger.info("Skip existing aggregation config | config=%s", config_name)
+            self.results.append(existing)
+            return existing
+
         self.logger.info("Run started | config=%s | freq_step=%s | pickup_step=%s | agg_method=%s | save_transformed_data=%s", config_name, freq_step, pickup_step, agg_method, save_transformed_data)
         
         precomputed_root = kwargs.get('precomputed_aggregated_root')
@@ -366,7 +372,7 @@ class AggregationExperiment:
                 save_path=plots_dir / "heatmap.png" if save else None
             )
         
-        print(f"✅ Графики: {plots_dir}")
+        print(f"[OK] Plots: {plots_dir}")
     
     def get_best_result(self, metric: str = 'r2_mean') -> pd.Series:
         """Получение лучшего результата по метрике"""

@@ -2,11 +2,14 @@
 Нейросетевые модели для решения обратной задачи МТЗ
 """
 import copy
+import json
 import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -19,7 +22,7 @@ from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
-from ..utils.logging_utils import setup_logger
+from ..utils.logging_utils import close_logger_file_handlers, logger_name_for_file, setup_logger
 
 
 class SingleLayerPerceptron(nn.Module):
@@ -41,6 +44,54 @@ class SingleLayerPerceptron(nn.Module):
         return self.network(x)
 
 
+def _history_json_path(curve_png_path: Path) -> Path:
+    return curve_png_path.with_name(
+        curve_png_path.name.replace('learning_curve', 'learning_history').replace('.png', '.json')
+    )
+
+
+def save_learning_history(
+    train_losses: List[float],
+    val_losses: List[float],
+    best_epoch: int,
+    save_path: Path,
+    title: str = "Кривая обучения",
+    extra: Optional[Dict] = None,
+) -> Path:
+    """Сохраняет полный ряд train/val loss — источник истины для кривой, не лог."""
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        'title': title,
+        'source': 'olp_in_memory',
+        'best_epoch': int(best_epoch),
+        'n_epochs': len(train_losses),
+        'train_losses': [float(v) for v in train_losses],
+        'val_losses': [float(v) for v in val_losses],
+    }
+    if extra:
+        payload.update(extra)
+    with open(save_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f)
+    return save_path
+
+
+def plot_learning_curve_from_history(history_path: Path, save_path: Optional[Path] = None) -> str:
+    """Перерисовать PNG из сохранённой истории (полный ряд эпох)."""
+    with open(history_path, 'r', encoding='utf-8') as f:
+        history = json.load(f)
+    png_path = Path(save_path) if save_path is not None else Path(history_path).with_name(
+        Path(history_path).name.replace('learning_history', 'learning_curve').replace('.json', '.png')
+    )
+    return _plot_learning_curve(
+        history['train_losses'],
+        history['val_losses'],
+        int(history.get('best_epoch', 0)),
+        str(png_path),
+        title=history.get('title', 'Кривая обучения'),
+    )
+
+
 def _plot_learning_curve(
     train_losses: List[float],
     val_losses: List[float],
@@ -48,7 +99,7 @@ def _plot_learning_curve(
     save_path: Optional[str] = None,
     title: str = "Кривая обучения"
 ) -> str:
-    """Построение кривой обучения."""
+    """Построение кривой обучения по полному ряду лосса (каждая эпоха)."""
     plt.figure(figsize=(10, 6))
     epochs = range(1, len(train_losses) + 1)
 
@@ -63,11 +114,11 @@ def _plot_learning_curve(
     plt.grid(True, alpha=0.3)
 
     if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         return save_path
 
-    plt.show()
     plt.close()
     return ""
 
@@ -83,7 +134,7 @@ def _create_metrics_df(n: int, r2: List[float], mse: List[float], mae: List[floa
 def _fill_missing_values(*dfs: pd.DataFrame) -> Tuple[pd.DataFrame, ...]:
     """Единая обработка пропусков."""
     if any(df.isna().any().any() for df in dfs):
-        print("⚠️ Обнаружены NaN, заполняем нулями")
+        print("[WARN] NaN detected, filling with zeros")
         return tuple(df.fillna(0) for df in dfs)
     return dfs
 
@@ -163,7 +214,8 @@ def OLP(
     enable_cv: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict]:
     """Обучение OLP с early stopping по validation loss."""
-    logger = setup_logger('src.models.neural_network', Path(log_file) if log_file else None)
+    log_path = Path(log_file) if log_file else None
+    logger = setup_logger(logger_name_for_file('src.models.neural_network', log_path), log_path)
 
     if device is None or device == 'auto':
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -384,6 +436,20 @@ def OLP(
     if graph or save_plot_path:
         plot_path = _plot_learning_curve(train_losses, val_losses, best_epoch, save_plot_path, plot_title)
         training_history['plot_path'] = plot_path
+        if save_plot_path:
+            history_path = save_learning_history(
+                train_losses,
+                val_losses,
+                best_epoch,
+                _history_json_path(Path(save_plot_path)),
+                title=plot_title,
+                extra={
+                    'optimizer': optimizer_type,
+                    'random_state': random_state,
+                    'device': str(device),
+                },
+            )
+            training_history['history_path'] = str(history_path)
 
     if enable_cv:
         logger.info("Cross-validation started")
@@ -454,6 +520,7 @@ def OLP(
         np.mean(pearson_test),
     )
 
+    close_logger_file_handlers(logger)
     return df_test, df_cv, df_cv_err, training_history
 
 
@@ -489,14 +556,15 @@ def to_excel_optimized_OLP(
     enable_cv: bool = True,
 ) -> List[Dict]:
     """Запуск нескольких итераций обучения и сохранение в Excel."""
-    logger = setup_logger('src.models.neural_network.batch', Path(log_file) if log_file else None)
+    log_path = Path(log_file) if log_file else None
+    logger = setup_logger(logger_name_for_file('src.models.neural_network.batch', log_path), log_path)
     all_results = []
     logger.info("Batch OLP start | n_iter=%s | optimizer=%s | device=%s | enable_cv=%s", n_iter, optimizer_type.upper(), device or 'auto', enable_cv)
 
     for i in range(n_iter):
         logger.info("Iteration %s/%s started", i + 1, n_iter)
 
-        current_graph = graph_first_only and i == 0
+        current_graph = graph_first_only and i == 0 and not save_plots_dir
         current_plot_path = None
         if save_plots_dir:
             os.makedirs(save_plots_dir, exist_ok=True)
@@ -599,7 +667,14 @@ def to_excel_optimized_OLP(
     except Exception as e:
         logger.exception("Failed to save Excel results to %s: %s", file_name, e)
 
+    close_logger_file_handlers(logger)
     return all_results
 
 
-__all__ = ['SingleLayerPerceptron', 'OLP', 'to_excel_optimized_OLP']
+__all__ = [
+    'SingleLayerPerceptron',
+    'OLP',
+    'to_excel_optimized_OLP',
+    'save_learning_history',
+    'plot_learning_curve_from_history',
+]

@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from ..evaluation.experiment import ExperimentResult, extract_metrics_from_excel
+from ..evaluation.experiment import ExperimentResult, extract_metrics_from_excel, load_experiment_result
 from ..evaluation.metrics import plot_feature_count_vs_time, plot_relative_training_time
 from ..preprocessing.pca import (
     PCATransformer,
@@ -63,7 +63,7 @@ class PCAExperiment:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         
         # Результаты
-        self.results: List[Dict] = []
+        self.results: List[ExperimentResult] = []
         self.transformers: Dict[int, PCATransformer] = {}
         self.logger = setup_logger(f'pca.{self.experiment_name}', self.base_dir / 'logs' / 'experiment.log')
         
@@ -76,6 +76,7 @@ class PCAExperiment:
         num_epochs: int = 500,
         learning_rate: float = 0.01,
         optimizer: str = 'adam',
+        momentum: float = 0.9,
         patience: int = 100,
         tolerance: float = 1e-4,
         tolerance_mode: str = 'relative',
@@ -91,6 +92,12 @@ class PCAExperiment:
             n_components: количество главных компонент (None = все)
         """
         config_name = f"pca_{n_components}" if n_components else "pca_all"
+        existing = load_experiment_result(self.base_dir / config_name / "summary.json")
+        if existing is not None and not kwargs.get('force_rerun'):
+            self.logger.info("Skip existing PCA config | config=%s", config_name)
+            self.results.append(existing)
+            return existing
+
         self.logger.info("PCA run started | config=%s | requested_n_components=%s | save_transformed_data=%s", config_name, n_components, save_transformed_data)
         
         precomputed_root = kwargs.get('precomputed_pca_root')
@@ -219,12 +226,18 @@ class PCAExperiment:
             save_plots_dir=str(curves_dir),
             save_models_dir=str(models_dir),
             optimizer_type=optimizer,
+            momentum=momentum,
             device=kwargs.get('device', 'auto'),
             log_file=str(self.base_dir / config_name / 'logs' / 'training.log'),
             enable_cv=kwargs.get('enable_cv', True)
         )
     
         total_time = time.time() - start_time
+        
+        # Per-iteration times
+        iter_times = [r['history']['total_time'] for r in all_results]
+        total_time_mean = float(np.mean(iter_times))
+        total_time_std = float(np.std(iter_times, ddof=1)) if len(iter_times) > 1 else 0.0
         
         # Метрики: сначала считаем из in-memory результатов, fallback — из Excel
         metrics = {}
@@ -260,6 +273,7 @@ class PCAExperiment:
             batch_size=batch_size,
             n_iter=n_iter,
             optimizer=optimizer,
+            momentum=momentum,
             n_features=actual_n_components,
             n_samples_train=len(train_pca),
             n_samples_valid=len(valid_pca),
@@ -269,7 +283,8 @@ class PCAExperiment:
             original_n_features=self.original_n_features,
             variance_explained=variance_explained,
             compression_ratio=self.original_n_features / actual_n_components,
-            total_time_seconds=total_time,
+            total_time_seconds=total_time_mean,
+            total_time_std=total_time_std,
             r2_mean=metrics.get('r2_mean', 0),
             r2_std=metrics.get('r2_std', 0),
             mse_mean=metrics.get('mse_mean', 0),
@@ -287,7 +302,7 @@ class PCAExperiment:
         with open(summary_path, 'w') as f:
             json.dump(result.to_dict(), f, indent=2)
         
-        self.logger.info("PCA run completed | config=%s | total_time=%.1fs | r2=%.4f | r2_std=%.4f", config_name, total_time, metrics.get('r2_mean', 0), metrics.get('r2_std', 0))
+        self.logger.info("PCA run completed | config=%s | total_time=%.1f±%.1fs | r2=%.4f | r2_std=%.4f", config_name, total_time_mean, total_time_std, metrics.get('r2_mean', 0), metrics.get('r2_std', 0))
         
         return result
     
@@ -391,11 +406,12 @@ class PCAExperiment:
 
         return fig
     
-    def get_best_result(self, metric: str = 'r2_mean') -> Dict:
-        """Получение лучшего результата по метрике."""
+    def get_best_result(self, metric: str = 'r2_mean') -> Optional[Dict]:
+        """Лучший результат по метрике. Возвращает dict, как ждут раннеры."""
         if not self.results:
             return None
-        return max(self.results, key=lambda x: x.get(metric, 0))
+        best = max(self.results, key=lambda x: getattr(x, metric, 0))
+        return best.to_dict()
     
     def summary(self) -> str:
         """Краткая сводка результатов."""

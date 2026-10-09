@@ -14,6 +14,13 @@ from .pca import (
     plot_pca_comparison
 )
 
+from .wavelet import (
+    WaveletTransformer,
+    apply_wavelet_to_data,
+    make_synthetic_mtz_frame,
+    wavelet_config_name,
+)
+
 __all__ = [
     # aggregation
     'aggregate_features',
@@ -26,5 +33,10 @@ __all__ = [
     'analyze_pca_variance',
     'find_optimal_n_components',
     'plot_explained_variance',
-    'plot_pca_comparison'
+    'plot_pca_comparison',
+    # wavelet
+    'WaveletTransformer',
+    'apply_wavelet_to_data',
+    'make_synthetic_mtz_frame',
+    'wavelet_config_name',
 ]

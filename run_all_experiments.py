@@ -19,9 +19,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import matplotlib
+matplotlib.use('Agg')
+
 from src.config import PROJECT_ROOT, EXPERIMENTS_DIR
 from src.experiment import PCAExperiment, AggregationExperiment
 from src.utils import load_mtz_data
+from src.utils.logging_utils import configure_stdio, install_safe_print
 from src.visualization.experiment_plots import generate_all_plots
 from plot_missing_graphs import process_experiment
 
@@ -31,19 +35,19 @@ from plot_missing_graphs import process_experiment
 # =============================================================================
 
 # Параметры PCA
-N_COMPONENTS_LIST = [16, 64, 256, 512, 1024, 1536,2048]
+N_COMPONENTS_LIST = [16, 64, 256, 512, 1024, 1536, 2048]
 
 # Параметры агрегации
 FREQ_STEPS = [1, 2, 3]
 PICKUP_STEPS = [1, 2, 3]
 AGG_METHODS = ['mean']
 
-# Параметры обучения (общие для всех экспериментов)
-N_ITER = 1
-NUM_EPOCHS = 1
+# Параметры обучения (как в run_aggregation / run_pca, не smoke 1 epoch)
+N_ITER = 3
+NUM_EPOCHS = 1000
 LEARNING_RATE = 0.01
-OPTIMIZER = 'sgd'
-PATIENCE = 250
+OPTIMIZER = 'adam'
+PATIENCE = 100
 TOLERANCE = 0.003
 TOLERANCE_MODE = 'relative'
 HIDDEN_DIM = 32
@@ -52,9 +56,10 @@ SAVE_TRANSFORMED_DATA = False
 DEVICE = 'auto'
 ENABLE_CV = False
 
-# Директория данных
+# Директория данных и изолированный прогон с датой
 DATA_DIR = PROJECT_ROOT / "Data"
-EXPERIMENTS_BASE_DIR = EXPERIMENTS_DIR
+RUN_TAG = "2026-09-01_agg_pca"
+EXPERIMENTS_BASE_DIR = EXPERIMENTS_DIR / RUN_TAG
 
 # Использовать предрасчитанные transformed-данные
 USE_PRECOMPUTED_AGGREGATED = True
@@ -286,12 +291,18 @@ def run_aggregation_experiment(train, valid, test, target, exp_name, precomputed
 
 
 def main():
+    configure_stdio()
+    install_safe_print()
+    EXPERIMENTS_BASE_DIR.mkdir(parents=True, exist_ok=True)
+
     print("=" * 70)
     print("ЗАПУСК ВСЕХ ЭКСПЕРИМЕНТОВ")
     print("=" * 70)
+    print(f"Результаты: {EXPERIMENTS_BASE_DIR}")
     print(f"Всего экспериментов: {len(EXPERIMENTS)}")
     print(f"PCA: {sum(1 for e in EXPERIMENTS if e['experiment_type'] == 'pca')}")
     print(f"AGG: {sum(1 for e in EXPERIMENTS if e['experiment_type'] == 'aggregation')}")
+    print(f"n_iter={N_ITER}, num_epochs={NUM_EPOCHS}, optimizer={OPTIMIZER}, batch_size={BATCH_SIZE}")
 
     # Подсчитываем для каждого таргета
     for target in ['H3_8', 'H1_8', 'H2_8']:
@@ -311,6 +322,12 @@ def main():
         exp_type = exp['experiment_type']
 
         print(f"\n[{i}/{len(EXPERIMENTS)}] Запуск: {exp_name}")
+
+        exp_out = EXPERIMENTS_BASE_DIR / exp_name
+        if (exp_out / "all_results.csv").exists():
+            print(f"  [SKIP] результаты уже есть: {exp_out / 'all_results.csv'}")
+            completed += 1
+            continue
 
         # Проверяем файлы
         train_path = DATA_DIR / train_file
