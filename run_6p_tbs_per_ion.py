@@ -1,7 +1,8 @@
 """
 ППОП как TrueBackwardFeatureSelection, отдельно на каждый ион.
 
-Пакет 1500. Все 5427 канала. cv=None: одна регрессия на train, без кросс-валидации.
+Пакет 1500. Все 5427 канала. cv=None.
+Регрессия учится на train, MSE считается на validation.
 Затем одновыходной персептрон на первых k признаках рейтинга, шаг 500, 3 seed.
 """
 from __future__ import annotations
@@ -31,7 +32,7 @@ from src.models.feature_selection import TrueBackwardFeatureSelection
 from src.models.neural_network import to_excel_optimized_OLP
 
 CACHE = Path(r"d:\Desktop\Geo_Features\experiments\6p_full_patience300\xy_cv1.npz")
-OUT_DIR = Path(r"d:\Desktop\Geo_Features\experiments\6p_tbs_per_ion")
+OUT_DIR = Path(r"d:\Desktop\Geo_Features\experiments\6p_tbs_per_ion_valid")
 TARGETS = ["Cu", "Ni", "Al", "Co", "Cr", "NO3"]
 N_TRAIN, N_VALID = 2225, 600
 DROP = 1500
@@ -58,7 +59,7 @@ def k_grid(n_features: int) -> list[int]:
     return ks
 
 
-def rank_ion(ion: str, X_train: pd.DataFrame, y_train: pd.Series) -> pd.DataFrame:
+def rank_ion(ion: str, X_train: pd.DataFrame, y_train: pd.Series, X_valid: pd.DataFrame, y_valid: pd.Series) -> pd.DataFrame:
     ion_dir = OUT_DIR / ion
     path = ion_dir / "ranking.csv"
     if path.exists():
@@ -71,10 +72,10 @@ def rank_ion(ion: str, X_train: pd.DataFrame, y_train: pd.Series) -> pd.DataFram
         n_features_to_drop=DROP,
         cv=None,
     )
-    selector.fit(X_train, y_train)
+    selector.fit(X_train, y_train, X_val=X_valid, y_val=y_valid)
     ranking = selector.get_ranking_df()
     ranking.to_csv(path, index=False)
-    print(ion, "PPOP done", len(ranking), flush=True)
+    print(ion, "PPOP done", len(ranking), "seconds", round(selector.elapsed_seconds_, 1), flush=True)
     return ranking
 
 
@@ -141,7 +142,13 @@ def main() -> None:
     parser.add_argument("--ion", required=True, choices=TARGETS)
     args = parser.parse_args()
     X, y = load_ion(args.ion)
-    ranking = rank_ion(args.ion, X.iloc[:N_TRAIN], y.iloc[:N_TRAIN])
+    ranking = rank_ion(
+        args.ion,
+        X.iloc[:N_TRAIN],
+        y.iloc[:N_TRAIN],
+        X.iloc[N_TRAIN:N_TRAIN + N_VALID],
+        y.iloc[N_TRAIN:N_TRAIN + N_VALID],
+    )
     train_curve(args.ion, X, y, ranking)
     print(args.ion, "finished", flush=True)
 

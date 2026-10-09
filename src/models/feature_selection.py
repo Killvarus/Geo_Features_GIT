@@ -216,6 +216,8 @@ class TrueBackwardFeatureSelection:
         self.random_state = random_state
         self.ranking_ = None
         self.individual_scores_ = {}
+        self._X_val = None
+        self._y_val = None
     
     def fit(self, X, y, X_val=None, y_val=None):
         features = X.columns.tolist()
@@ -225,14 +227,19 @@ class TrueBackwardFeatureSelection:
         feature_group_ranks = {feature: 0 for feature in features}
         feature_individual_ranks = {feature: 0 for feature in features}
         self.individual_scores_ = {feature: 0 for feature in features}
+        if (X_val is None) != (y_val is None):
+            raise ValueError("X_val и y_val нужно передавать вместе")
+        self._X_val = X_val
+        self._y_val = y_val
         
         current_group_rank = 1
         global_individual_rank = 1
         
         print(f"🚀 Запуск TRUE backward elimination")
         print(f"📊 Всего признаков: {n_features}")
-        
+
         iteration = 0
+        started = time.perf_counter()
         
         with tqdm(total=n_features, desc="Backward Elimination") as pbar:
             while len(current_features) > self.n_features_to_drop:
@@ -274,8 +281,9 @@ class TrueBackwardFeatureSelection:
             'individual_rank': feature_individual_ranks,
             'scores': self.individual_scores_
         }
-        
-        print(f"✅ Завершено! Всего итераций: {iteration}")
+        self.elapsed_seconds_ = time.perf_counter() - started
+
+        print(f"Завершено. Итераций: {iteration}. Время ППОП: {self.elapsed_seconds_:.1f} с")
         return self
     
     def _train_models_sequential(self, X, y):
@@ -294,17 +302,20 @@ class TrueBackwardFeatureSelection:
     
     def _evaluate_model(self, X, y):
         model = clone(self.estimator)
-        
+        from sklearn.metrics import mean_squared_error
+
         try:
+            if self._X_val is not None:
+                model.fit(X, y)
+                prediction = model.predict(self._X_val.loc[:, X.columns])
+                return -float(mean_squared_error(self._y_val, prediction))
             if self.cv is not None:
                 scores = cross_val_score(model, X, y, cv=self.cv, scoring=self.scoring, n_jobs=1)
                 return float(np.mean(scores))
-            else:
-                model.fit(X, y)
-                y_pred = model.predict(X)
-                from sklearn.metrics import mean_squared_error
-                return -float(mean_squared_error(y, y_pred))
-        except:
+            model.fit(X, y)
+            prediction = model.predict(X)
+            return -float(mean_squared_error(y, prediction))
+        except Exception:
             return 0.0
     
     def get_ranking_df(self):
