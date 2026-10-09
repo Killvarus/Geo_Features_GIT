@@ -14,6 +14,7 @@ from .feature_selection import (
     get_discrete_selected_features,
     FeatureRankingProcessor
 )
+from .forward_selection import ForwardBatchRidgeSelection
 
 __all__ = [
     'OLP',
@@ -27,6 +28,7 @@ __all__ = [
     'IFS_feature_selection_auto',
     'TrueBackwardFeatureSelection',
     'run_true_backward_selection',
+    'ForwardBatchRidgeSelection',
     'NN_weight',
     'get_discrete_selected_features',
     'FeatureRankingProcessor'
