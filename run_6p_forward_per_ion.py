@@ -3,6 +3,7 @@
 
 Пакет 1500. Все 5427 канала. MSE на validation.
 Затем одновыходной персептрон на первых k признаках, шаг 500, 3 seed.
+alpha=700 — Ridge. alpha=0 — тот же отбор без штрафа, обычный МНК через LSQR.
 """
 from __future__ import annotations
 
@@ -30,11 +31,20 @@ from src.models.forward_selection import ForwardBatchRidgeSelection
 from src.models.neural_network import to_excel_optimized_OLP
 
 CACHE = Path(__file__).resolve().parent / "experiments" / "6p_full_patience300" / "xy_cv1.npz"
-OUT_DIR = Path(__file__).resolve().parent / "experiments" / "6p_forward_ridge_valid"
 TARGETS = ["Cu", "Ni", "Al", "Co", "Cr", "NO3"]
 N_TRAIN, N_VALID = 2225, 600
 ALPHA = 700.0
 PACKET = 1500
+OUT_DIR = Path(__file__).resolve().parent / "experiments" / "6p_forward_ridge_valid"
+
+
+def resolve_out_dir(alpha: float) -> Path:
+    root = Path(__file__).resolve().parent / "experiments"
+    if alpha == 0.0:
+        return root / "6p_forward_ols_valid"
+    if alpha == 700.0:
+        return root / "6p_forward_ridge_valid"
+    return root / f"6p_forward_ridge_a{alpha:g}_valid"
 
 
 def feature_names() -> list[str]:
@@ -156,7 +166,11 @@ def maybe_plot() -> None:
     axes[1, 0].set_ylabel("R² на тесте")
     for ax in axes[1]:
         ax.set_xlabel("Число признаков")
-    fig.suptitle("Прямой отбор, Ridge alpha=700, MSE на validation", y=1.02)
+    if ALPHA == 0.0:
+        title = "Прямой отбор, без регуляризации, MSE на validation"
+    else:
+        title = f"Прямой отбор, Ridge alpha={ALPHA:g}, MSE на validation"
+    fig.suptitle(title, y=1.02)
     fig.tight_layout()
     out = OUT_DIR / "r2_vs_n_features.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
@@ -165,10 +179,16 @@ def maybe_plot() -> None:
 
 
 def main() -> None:
+    global ALPHA, OUT_DIR
     parser = argparse.ArgumentParser()
     parser.add_argument("--ion", choices=TARGETS)
+    parser.add_argument("--alpha", type=float, default=700.0)
     parser.add_argument("--plot-only", action="store_true")
     args = parser.parse_args()
+    if args.alpha < 0:
+        parser.error("alpha должен быть >= 0")
+    ALPHA = float(args.alpha)
+    OUT_DIR = resolve_out_dir(ALPHA)
     if args.plot_only:
         maybe_plot()
         return

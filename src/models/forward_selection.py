@@ -21,6 +21,8 @@ class ForwardBatchRidgeSelection:
     def __init__(self, alpha: float = 700.0, n_features_to_add: int = 1500):
         if n_features_to_add < 1:
             raise ValueError("n_features_to_add must be >= 1")
+        if float(alpha) < 0:
+            raise ValueError("alpha must be >= 0")
         self.alpha = float(alpha)
         self.n_features_to_add = int(n_features_to_add)
         self.ranking_: dict | None = None

@@ -38,6 +38,24 @@ def test_score_is_validation_mse_of_ridge():
     assert selector.elapsed_seconds_ > 0.0
 
 
+def test_alpha_zero_score_is_unpenalized_validation_mse():
+    rng = np.random.default_rng(4)
+    n = 40
+    signal_train = rng.normal(size=n)
+    signal_valid = rng.normal(size=n)
+    X_train = pd.DataFrame({"signal": signal_train, "noise": rng.normal(size=n)})
+    X_valid = pd.DataFrame({"signal": signal_valid, "noise": rng.normal(size=n)})
+    y_train = 2.0 * signal_train
+    y_valid = 2.0 * signal_valid
+    selector = ForwardBatchRidgeSelection(alpha=0.0, n_features_to_add=1)
+    selector.fit(X_train, y_train, X_valid, y_valid)
+    expected = _manual_mse(X_train, y_train, X_valid, y_valid, ["signal"], 0.0)
+    score = selector.ranking_frame().set_index("Feature").loc["signal", "Score"]
+    penalized = _manual_mse(X_train, y_train, X_valid, y_valid, ["signal"], 700.0)
+    assert abs(score - expected) < 1e-6
+    assert abs(score - penalized) > 1e-6
+
+
 def test_adds_new_signal_before_redundant_copy_when_penalty_is_small():
     rng = np.random.default_rng(1)
     n = 80
