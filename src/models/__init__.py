@@ -15,6 +15,7 @@ from .feature_selection import (
     FeatureRankingProcessor
 )
 from .forward_selection import ForwardBatchRidgeSelection
+from .ridge_rfe import BackwardRidgeRFE, ForwardRidgeRFE
 
 __all__ = [
     'OLP',
@@ -29,6 +30,8 @@ __all__ = [
     'TrueBackwardFeatureSelection',
     'run_true_backward_selection',
     'ForwardBatchRidgeSelection',
+    'BackwardRidgeRFE',
+    'ForwardRidgeRFE',
     'NN_weight',
     'get_discrete_selected_features',
     'FeatureRankingProcessor'
