@@ -1,0 +1,338 @@
+"""
+ППОП и RFE для линейной регрессии: МНК (alpha=0) и Ridge (alpha>0).
+
+Признаки стандартизуются по обучающей части, y центрируется. Так модель
+совпадает с Pipeline(StandardScaler(), Ridge(alpha)), а при alpha=0 — с LinearRegression.
+
+Пусть A = XᵀX + alpha·I на текущем наборе признаков и β = A⁻¹Xᵀy. Решение той же
+задачи без признака j: β₋ⱼ = β − A⁻¹[:, j]·βⱼ / A⁻¹[j, j]. Это точная формула, не
+приближение, поэтому N моделей на N−1 признаке считаются из одного обращения A.
+
+ППОП выбрасывает пакет признаков, без которых MSE на оценочной выборке выросла
+меньше всего (или упала). RFE выбрасывает пакет с наименьшими |β| на train.
+В обоих методах ранг 1 получает признак, продержавшийся дольше всех.
+
+Пакет задаётся как в sklearn.feature_selection.RFE: целое — число признаков,
+дробь из (0, 1) — доля от оставшихся (округление вверх, не меньше одного).
+"""
+from __future__ import annotations
+
+import math
+import time
+from numbers import Integral, Real
+from pathlib import Path
+from typing import Hashable
+
+import numpy as np
+import pandas as pd
+from scipy.linalg import lapack
+from scipy.linalg.blas import dger
+from sklearn.model_selection import KFold
+
+
+def check_step(step) -> None:
+    if isinstance(step, bool):
+        raise ValueError("step должен быть целым >= 1 или дробью из (0, 1)")
+    if isinstance(step, Integral):
+        if step < 1:
+            raise ValueError("целый step должен быть >= 1")
+        return
+    if isinstance(step, Real) and 0.0 < float(step) < 1.0:
+        return
+    raise ValueError("step должен быть целым >= 1 или дробью из (0, 1)")
+
+
+def packet_size(n_remaining: int, step, min_step: int = 1) -> int:
+    """Сколько признаков выбросить, когда их осталось n_remaining."""
+    check_step(step)
+    if isinstance(step, Integral):
+        size = int(step)
+    else:
+        size = math.ceil(float(step) * n_remaining)
+    return min(n_remaining, max(size, int(min_step), 1))
+
+
+def _check_alpha(alpha: float) -> float:
+    alpha = float(alpha)
+    if not alpha >= 0.0:
+        raise ValueError("alpha должен быть >= 0")
+    return alpha
+
+
+def _as_target(y, n_rows: int) -> np.ndarray:
+    target = np.asarray(y, dtype=float).reshape(-1)
+    if len(target) != n_rows:
+        raise ValueError("Длины X и y не совпадают")
+    return target
+
+
+def _standardize(X_fit: np.ndarray, *others: np.ndarray) -> list[np.ndarray]:
+    """Как StandardScaler: среднее и std (ddof=0) по X_fit, у константы масштаб 1."""
+    mean = X_fit.mean(axis=0)
+    std = X_fit.std(axis=0)
+    std[std == 0.0] = 1.0
+    return [(X - mean) / std for X in (X_fit, *others)]
+
+
+def _inverse(gram: np.ndarray, alpha: float, n_rows: int) -> np.ndarray:
+    """(XᵀX + alpha·I)⁻¹ через Холецкого. При alpha=0 нужна невырожденная XᵀX."""
+    p = gram.shape[0]
+    if alpha == 0.0 and p >= n_rows:
+        raise ValueError(
+            f"МНК без штрафа не определён: признаков {p}, строк {n_rows}. "
+            "После центрирования ранг XᵀX не больше n−1, решений бесконечно много. "
+            "Нужен alpha > 0 или меньше признаков."
+        )
+    matrix = np.array(gram, dtype=float, order="F", copy=True)
+    matrix[np.diag_indices(p)] += alpha
+    factor, info = lapack.dpotrf(matrix, lower=0, overwrite_a=1)
+    if info != 0:
+        raise ValueError(
+            f"XᵀX + alpha·I вырождена (dpotrf info={info}). "
+            "Признаки линейно зависимы, нужен alpha > 0."
+        )
+    inverse, info = lapack.dpotri(factor, lower=0, overwrite_c=1)
+    if info != 0:
+        raise ValueError(f"не удалось обратить матрицу (dpotri info={info})")
+    upper = np.triu(inverse)
+    return upper + np.triu(inverse, 1).T
+
+
+def _ordered(positions: np.ndarray, values: np.ndarray, names: list, descending: bool) -> list[int]:
+    """Позиции по значению, при равенстве — по имени признака."""
+    sign = -1.0 if descending else 1.0
+    return sorted(range(len(positions)), key=lambda i: (sign * values[i], str(names[positions[i]])))
+
+
+def _ranks(names: list, packets: list[list[int]], scores: dict[int, float]) -> pd.DataFrame:
+    """Последний выброшенный пакет — группа 1, внутри пакета по убыванию score."""
+    rows = []
+    next_rank = 1
+    for group, packet in enumerate(reversed(packets), 1):
+        best_first = sorted(packet, key=lambda i: (-scores[i], str(names[i])))
+        for offset, i in enumerate(best_first):
+            rows.append(
+                {
+                    "Feature": names[i],
+                    "Group_Rank": group,
+                    "Individual_Rank": next_rank + offset,
+                    "Score": scores[i],
+                }
+            )
+        next_rank += len(packet)
+    return pd.DataFrame(rows)
+
+
+class _SelectorBase:
+    ranking_: pd.DataFrame | None
+    history_: pd.DataFrame | None
+    elapsed_seconds_: float | None
+
+    def ranking_frame(self) -> pd.DataFrame:
+        if self.ranking_ is None:
+            raise RuntimeError("Сначала вызовите fit()")
+        return self.ranking_.copy()
+
+    def save_ranking(self, path: str | Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.ranking_frame().to_csv(path, index=False)
+        return path
+
+
+class _Split:
+    """Одна пара (обучение, оценка), стандартизованная по обучающей части."""
+
+    def __init__(self, X_fit: np.ndarray, y_fit: np.ndarray, X_eval: np.ndarray, y_eval: np.ndarray):
+        X_fit, X_eval = _standardize(X_fit, X_eval)
+        y_mean = y_fit.mean()
+        self.n_fit = len(y_fit)
+        self.n_eval = len(y_eval)
+        self.gram = X_fit.T @ X_fit
+        self.xty = X_fit.T @ (y_fit - y_mean)
+        self.X_eval = X_eval
+        self.y_eval = y_eval - y_mean
+
+    def sse_without_each(self, columns: np.ndarray, alpha: float) -> tuple[np.ndarray, float]:
+        """SSE на оценочной части для модели на columns и для каждой модели без одного признака."""
+        inverse = _inverse(self.gram[np.ix_(columns, columns)], alpha, self.n_fit)
+        beta = inverse @ self.xty[columns]
+        X_eval = self.X_eval[:, columns]
+        residual = self.y_eval - X_eval @ beta
+        shift = X_eval @ inverse
+        coef = beta / np.diag(inverse)
+        base = float(residual @ residual)
+        # Остаток без признака j: residual + shift[:, j]·coef[j].
+        sse = base + 2.0 * coef * (residual @ shift) + coef**2 * np.einsum("ij,ij->j", shift, shift)
+        return sse, base
+
+
+class LinearPPOP(_SelectorBase):
+    """
+    ППОП на МНК или Ridge.
+
+    Оценочная выборка: если в fit переданы X_eval, y_eval — MSE считается на них
+    (например, на validation). Иначе — K-fold на переданном train, cv фолдов.
+    Score признака — на сколько выросла MSE без него в момент выбрасывания.
+    """
+
+    def __init__(self, alpha: float = 0.0, step=0.1, min_step: int = 1, cv: int = 5, random_state: int = 0):
+        check_step(step)
+        if cv < 2:
+            raise ValueError("cv должен быть >= 2")
+        self.alpha = _check_alpha(alpha)
+        self.step = step
+        self.min_step = int(min_step)
+        self.cv = int(cv)
+        self.random_state = random_state
+        self.ranking_ = None
+        self.history_ = None
+        self.elapsed_seconds_ = None
+
+    def _splits(self, X: np.ndarray, y: np.ndarray, X_eval, y_eval) -> list[_Split]:
+        if X_eval is not None:
+            return [_Split(X, y, np.asarray(X_eval, dtype=float), _as_target(y_eval, len(X_eval)))]
+        folds = KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
+        return [_Split(X[fit], y[fit], X[held], y[held]) for fit, held in folds.split(X)]
+
+    def fit(self, X: pd.DataFrame, y, X_eval: pd.DataFrame | None = None, y_eval=None) -> "LinearPPOP":
+        if (X_eval is None) != (y_eval is None):
+            raise ValueError("X_eval и y_eval нужно передавать вместе")
+        if X_eval is not None and list(X_eval.columns) != list(X.columns):
+            raise ValueError("Колонки train и оценочной выборки должны совпадать и идти в одном порядке")
+        names: list[Hashable] = list(X.columns)
+        started = time.perf_counter()
+        splits = self._splits(X.to_numpy(dtype=float), _as_target(y, len(X)), X_eval, y_eval)
+        n_eval = sum(split.n_eval for split in splits)
+
+        remaining = np.arange(len(names))
+        packets: list[list[int]] = []
+        scores: dict[int, float] = {}
+        history = []
+        while remaining.size:
+            step_started = time.perf_counter()
+            sse = np.zeros(remaining.size)
+            base = 0.0
+            for split in splits:
+                part, part_base = split.sse_without_each(remaining, self.alpha)
+                sse += part
+                base += part_base
+            mse_full = base / n_eval
+            increase = sse / n_eval - mse_full
+            size = packet_size(remaining.size, self.step, self.min_step)
+            # Без них MSE выросла меньше всего — они нужны меньше всего.
+            drop = _ordered(remaining, increase, names, descending=False)[:size]
+            for i in drop:
+                scores[int(remaining[i])] = float(increase[i])
+            packets.append([int(remaining[i]) for i in drop])
+            history.append(
+                {
+                    "n_features": int(remaining.size),
+                    "mse": mse_full,
+                    "dropped": size,
+                    "seconds": time.perf_counter() - step_started,
+                }
+            )
+            print(
+                f"PPOP {len(history)}: features {remaining.size}, mse {mse_full:.6g}, "
+                f"dropped {size}, step_s {history[-1]['seconds']:.1f}",
+                flush=True,
+            )
+            remaining = np.delete(remaining, drop)
+
+        self.ranking_ = _ranks(names, packets, scores)
+        self.history_ = pd.DataFrame(history)
+        self.elapsed_seconds_ = time.perf_counter() - started
+        return self
+
+
+class LinearRFE(_SelectorBase):
+    """
+    RFE на МНК или Ridge. Важность — |β| после стандартизации train.
+
+    step=1 — классический RFE. Обратная матрица после выбрасывания обновляется
+    формулой понижения ранга, раз в refresh_every выброшенных признаков
+    пересчитывается заново, чтобы не копилась ошибка округления.
+    """
+
+    def __init__(self, alpha: float = 700.0, step=1, min_step: int = 1, refresh_every: int = 256):
+        check_step(step)
+        if refresh_every < 1:
+            raise ValueError("refresh_every должен быть >= 1")
+        self.alpha = _check_alpha(alpha)
+        self.step = step
+        self.min_step = int(min_step)
+        self.refresh_every = int(refresh_every)
+        self.ranking_ = None
+        self.history_ = None
+        self.elapsed_seconds_ = None
+
+    def fit(self, X: pd.DataFrame, y) -> "LinearRFE":
+        names: list[Hashable] = list(X.columns)
+        started = time.perf_counter()
+        (scaled,) = _standardize(X.to_numpy(dtype=float))
+        target = _as_target(y, len(X))
+        gram = scaled.T @ scaled
+        xty = scaled.T @ (target - target.mean())
+        n_rows = len(target)
+
+        # block — признаки, по которым построена inverse; active — ещё не выброшенные из block.
+        block = np.arange(len(names))
+        inverse = _inverse(gram, self.alpha, n_rows)
+        active = np.ones(block.size, dtype=bool)
+        since_refresh = 0
+        packets: list[list[int]] = []
+        scores: dict[int, float] = {}
+        history = []
+        while active.any():
+            step_started = time.perf_counter()
+            # У выброшенных строки и столбцы inverse обнулены, их β тоже 0.
+            beta = inverse @ xty[block]
+            positions = np.flatnonzero(active)
+            weights = np.abs(beta[positions])
+            size = packet_size(positions.size, self.step, self.min_step)
+            drop = [positions[i] for i in _ordered(block[positions], weights, names, descending=False)[:size]]
+            for j in drop:
+                scores[int(block[j])] = float(abs(beta[j]))
+            packets.append([int(block[j]) for j in drop])
+            active[drop] = False
+            since_refresh += size
+            if active.any():
+                if since_refresh >= self.refresh_every:
+                    block = block[active]
+                    active = np.ones(block.size, dtype=bool)
+                    inverse = _inverse(gram[np.ix_(block, block)], self.alpha, n_rows)
+                    since_refresh = 0
+                else:
+                    inverse = self._downdate(inverse, drop)
+            history.append(
+                {
+                    "n_features": int(positions.size),
+                    "dropped": size,
+                    "smallest_abs_coef": float(weights.min()),
+                    "seconds": time.perf_counter() - step_started,
+                }
+            )
+            if len(history) % 250 == 1 or not active.any() or size > 1:
+                print(
+                    f"RFE {len(history)}: features {positions.size}, dropped {size}, "
+                    f"smallest_abs_coef {weights.min():.6g}, step_s {history[-1]['seconds']:.2f}",
+                    flush=True,
+                )
+
+        self.ranking_ = _ranks(names, packets, scores)
+        self.history_ = pd.DataFrame(history)
+        self.elapsed_seconds_ = time.perf_counter() - started
+        return self
+
+    @staticmethod
+    def _downdate(inverse: np.ndarray, drop: list[int]) -> np.ndarray:
+        """A⁻¹ без признаков drop: A⁻¹ − A⁻¹[:, D]·(A⁻¹[D, D])⁻¹·A⁻¹[D, :]. Строки D становятся нулевыми."""
+        if len(drop) == 1:
+            j = drop[0]
+            column = inverse[:, j].copy()
+            # inverse симметрична, транспонированный вид F-непрерывен — dger правит её на месте.
+            updated = dger(-1.0 / column[j], column, column, a=inverse.T, overwrite_a=1)
+            return inverse if np.shares_memory(updated, inverse) else np.ascontiguousarray(updated.T)
+        columns = inverse[:, drop]
+        return inverse - columns @ np.linalg.solve(inverse[np.ix_(drop, drop)], columns.T)

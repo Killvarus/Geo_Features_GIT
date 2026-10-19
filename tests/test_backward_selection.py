@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
@@ -26,7 +27,8 @@ def _splits():
 
 def test_score_is_negative_mse_on_validation_not_train():
     X_train, y_train, X_valid, y_valid = _splits()
-    selector = TrueBackwardFeatureSelection(LinearRegression(), n_features_to_drop=1, cv=None)
+    # Один пакет на все признаки: score каждого — с первой итерации.
+    selector = TrueBackwardFeatureSelection(LinearRegression(), n_features_to_drop=3, cv=None)
     selector.fit(X_train, y_train, X_val=X_valid, y_val=y_valid)
 
     reduced = X_train.drop(columns=["signal"])
@@ -52,7 +54,7 @@ def test_signal_is_ranked_ahead_of_decoy_by_validation_mse():
 
 def test_without_validation_score_stays_on_train():
     X_train, y_train, _, _ = _splits()
-    selector = TrueBackwardFeatureSelection(LinearRegression(), n_features_to_drop=1, cv=None)
+    selector = TrueBackwardFeatureSelection(LinearRegression(), n_features_to_drop=3, cv=None)
     selector.fit(X_train, y_train)
     reduced = X_train.drop(columns=["noise"])
     model = LinearRegression().fit(reduced, y_train)
@@ -60,3 +62,39 @@ def test_without_validation_score_stays_on_train():
     score = selector.get_ranking_df().set_index("Feature").loc["noise", "Score"]
     assert abs(score - expected) < 1e-8
     assert selector.elapsed_seconds_ > 0.0
+
+
+def test_least_needed_features_are_dropped_first():
+    # y = 2a + b. Канал a_copy почти повторяет a, поэтому пока оба в модели,
+    # каждый из них по отдельности не нужен. Правильный ППОП сначала выбрасывает
+    # шум и дубликат, а последним остаётся сильный канал. Если выбрасывать
+    # самые нужные, первым уйдёт уникальный b и получит ранг 1.
+    rng = np.random.default_rng(1)
+    n = 200
+    a = rng.normal(size=n)
+    b = rng.normal(size=n)
+    X = pd.DataFrame(
+        {
+            "a": a,
+            "a_copy": a + rng.normal(scale=0.05, size=n),
+            "b": b,
+            "noise": rng.normal(size=n),
+        }
+    )
+    y = pd.Series(2 * a + b + rng.normal(scale=0.1, size=n))
+    selector = TrueBackwardFeatureSelection(LinearRegression(), n_features_to_drop=1, cv=None)
+    selector.fit(X, y)
+    ranking = selector.get_ranking_df()
+    assert ranking["Feature"].tolist()[:2] in (["a", "b"], ["a_copy", "b"])
+    assert ranking["Feature"].tolist()[-1] in ("noise", "a", "a_copy")
+    assert ranking["Group_Rank"].tolist() == [1, 2, 3, 4]
+
+
+def test_fraction_packet_and_last_feature_scored_against_mean():
+    X_train, y_train, X_valid, y_valid = _splits()
+    selector = TrueBackwardFeatureSelection(LinearRegression(), n_features_to_drop=0.5, cv=None)
+    selector.fit(X_train, y_train, X_val=X_valid, y_val=y_valid)
+    ranking = selector.get_ranking_df().set_index("Feature")
+    expected = -mean_squared_error(y_valid, np.full(len(y_valid), y_train.mean()))
+    assert ranking.loc["signal", "Group_Rank"] == 1
+    assert ranking.loc["signal", "Score"] == pytest.approx(expected)
