@@ -25,6 +25,7 @@ LABELS = {
     "6p_rfe_ridge_a700_step0.1": "RFE, alpha 700",
     "6p_rfe_ridge_loo_step0.1": "RFE, LOO",
     "6p_rfe_ridge_loo1se_step0.1": "RFE, LOO-1SE",
+    "6p_rfe_ridge_loosched500_step0.1": "RFE, 1SE → LOO с 500",
     "6p_ppop_ridge_loo1se_step0.1_cv5": "ППОП, LOO-1SE",
 }
 

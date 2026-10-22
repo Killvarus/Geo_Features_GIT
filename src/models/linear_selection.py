@@ -22,6 +22,9 @@ alpha="loo1se": то же, но берётся самый большой штр�
 минимальной плюс одна её стандартная ошибка (правило одной SE, как lambda.1se
 в glmnet). При тысяче скоррелированных каналов минимум LOO даёт почти МНК,
 и решения о выбрасывании становятся шумом; правило 1SE держит штраф выше.
+alpha="loo_schedule": правило 1SE, пока признаков больше switch_at, и минимум LOO,
+когда их switch_at или меньше. Минимум лучше выбирает первые сотни каналов,
+1SE не даёт отбору развалиться на тысячах скоррелированных каналов.
 """
 from __future__ import annotations
 
@@ -61,12 +64,13 @@ def packet_size(n_remaining: int, step, min_step: int = 1) -> int:
 
 
 LOO_ALPHAS = np.logspace(-3, 6, 46)
+LOO_MODES = ("loo", "loo1se", "loo_schedule")
 
 
 def _check_alpha(alpha) -> float | str:
     if isinstance(alpha, str):
-        if alpha not in ("loo", "loo1se"):
-            raise ValueError('alpha должен быть числом >= 0, "loo" или "loo1se"')
+        if alpha not in LOO_MODES:
+            raise ValueError('alpha должен быть числом >= 0, "loo", "loo1se" или "loo_schedule"')
         return alpha
     alpha = float(alpha)
     if not alpha >= 0.0:
@@ -127,7 +131,16 @@ def loo_alpha(
     return float(max(alpha for alpha, mean in zip(alphas, means) if mean <= limit))
 
 
-def _loo_rule(alpha: str) -> str:
+def _check_switch_at(switch_at) -> int:
+    if isinstance(switch_at, bool) or not isinstance(switch_at, Integral) or switch_at < 0:
+        raise ValueError("switch_at должен быть целым >= 0")
+    return int(switch_at)
+
+
+def _loo_rule(alpha: str, n_features: int, switch_at: int) -> str:
+    """Правило выбора alpha для набора из n_features признаков."""
+    if alpha == "loo_schedule":
+        return "1se" if n_features > switch_at else "min"
     return "1se" if alpha == "loo1se" else "min"
 
 
@@ -259,11 +272,13 @@ class LinearPPOP(_SelectorBase):
         cv: int = 5,
         random_state: int = 0,
         reshuffle: bool = False,
+        switch_at: int = 500,
     ):
         check_step(step)
         if cv < 2:
             raise ValueError("cv должен быть >= 2")
         self.alpha = _check_alpha(alpha)
+        self.switch_at = _check_switch_at(switch_at)
         self.step = step
         self.min_step = int(min_step)
         self.cv = int(cv)
@@ -304,7 +319,7 @@ class LinearPPOP(_SelectorBase):
             step_started = time.perf_counter()
             if isinstance(self.alpha, str):
                 u, s2, _ = ridge_spectrum(scaled[:, remaining])
-                alpha = loo_alpha(u, s2, centered, rule=_loo_rule(self.alpha))
+                alpha = loo_alpha(u, s2, centered, rule=_loo_rule(self.alpha, remaining.size, self.switch_at))
             else:
                 alpha = self.alpha
             sse = np.zeros(remaining.size)
@@ -357,13 +372,23 @@ class LinearRFE(_SelectorBase):
     step=1 — классический RFE. Обратная матрица после выбрасывания обновляется
     формулой понижения ранга, раз в refresh_every выброшенных признаков
     пересчитывается заново, чтобы не копилась ошибка округления.
+    При alpha="loo_schedule" матрица пересчитывается и в момент, когда признаков
+    осталось switch_at или меньше: с этого шага alpha берётся по минимуму LOO.
     """
 
-    def __init__(self, alpha: float | str = 700.0, step=1, min_step: int = 1, refresh_every: int = 256):
+    def __init__(
+        self,
+        alpha: float | str = 700.0,
+        step=1,
+        min_step: int = 1,
+        refresh_every: int = 256,
+        switch_at: int = 500,
+    ):
         check_step(step)
         if refresh_every < 1:
             raise ValueError("refresh_every должен быть >= 1")
         self.alpha = _check_alpha(alpha)
+        self.switch_at = _check_switch_at(switch_at)
         self.step = step
         self.min_step = int(min_step)
         self.refresh_every = int(refresh_every)
@@ -380,15 +405,21 @@ class LinearRFE(_SelectorBase):
         xty = scaled.T @ (target - target.mean())
         n_rows = len(target)
 
+        def rule_for(n_features: int) -> str | None:
+            if not isinstance(self.alpha, str):
+                return None
+            return _loo_rule(self.alpha, n_features, self.switch_at)
+
         def choose_alpha(columns: np.ndarray) -> float:
             if not isinstance(self.alpha, str):
                 return self.alpha
             u, s2, _ = ridge_spectrum(scaled[:, columns])
-            return loo_alpha(u, s2, target - target.mean(), rule=_loo_rule(self.alpha))
+            return loo_alpha(u, s2, target - target.mean(), rule=rule_for(columns.size))
 
         # block — признаки, по которым построена inverse; active — ещё не выброшенные из block.
         block = np.arange(len(names))
         alpha = choose_alpha(block)
+        rule = rule_for(block.size)
         inverse = _inverse(gram, alpha, n_rows)
         active = np.ones(block.size, dtype=bool)
         since_refresh = 0
@@ -410,10 +441,12 @@ class LinearRFE(_SelectorBase):
             active[drop] = False
             since_refresh += size
             if active.any():
-                if since_refresh >= self.refresh_every:
+                switched = rule_for(int(active.sum())) != rule
+                if since_refresh >= self.refresh_every or switched:
                     block = block[active]
                     active = np.ones(block.size, dtype=bool)
                     alpha = choose_alpha(block)
+                    rule = rule_for(block.size)
                     inverse = _inverse(gram[np.ix_(block, block)], alpha, n_rows)
                     since_refresh = 0
                 else:

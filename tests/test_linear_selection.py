@@ -183,3 +183,75 @@ def test_ppop_reshuffle_uses_new_folds_each_iteration():
     several = LinearPPOP(alpha=3.0, step=0.3, cv=4, random_state=1, reshuffle=True).fit(X_train, y_train)
     assert sorted(several.ranking_frame()["Individual_Rank"]) == list(range(1, 11))
     assert several.history_["mse"].iloc[0] == pytest.approx(plain.history_["mse"].iloc[0])
+
+
+def test_rfe_loo_schedule_switches_rule_at_threshold():
+    from src.models.linear_selection import loo_alpha, ridge_spectrum
+
+    X_train, y_train, _, _ = _data(n_train=60, p=30, seed=6)
+    ours = LinearRFE(alpha="loo_schedule", step=1, switch_at=12, refresh_every=5).fit(X_train, y_train)
+    scaled = pd.DataFrame(StandardScaler().fit_transform(X_train), columns=X_train.columns)
+    target = y_train.to_numpy() - y_train.mean()
+    order = ours.ranking_frame().sort_values("Individual_Rank", ascending=False)["Feature"].tolist()
+    remaining = list(X_train.columns)
+    since_refresh = 0
+    for n_features, alpha in zip(ours.history_["n_features"], ours.history_["alpha"]):
+        # Пересчёт раз в 5 шагов и сразу при 12 признаках, когда меняется правило.
+        if n_features in (30, 12) or since_refresh == 5:
+            u, s2, _ = ridge_spectrum(scaled[remaining].to_numpy())
+            expected = loo_alpha(u, s2, target, rule="1se" if n_features > 12 else "min")
+            if n_features <= 12:
+                reference = RidgeCV(alphas=np.logspace(-3, 6, 46)).fit(scaled[remaining], y_train)
+                assert expected == pytest.approx(reference.alpha_)
+            since_refresh = 0
+        assert alpha == pytest.approx(expected)
+        since_refresh += 1
+        coef = np.abs(Ridge(alpha=alpha).fit(scaled[remaining], y_train).coef_)
+        assert order[30 - n_features] == remaining.pop(int(np.argmin(coef)))
+    assert ours.history_["alpha"].nunique() > 1
+
+
+@pytest.mark.parametrize("switch_at, plain", [(1000, "loo"), (0, "loo1se")])
+def test_loo_schedule_reduces_to_one_rule(switch_at, plain):
+    X_train, y_train, X_valid, y_valid = _data(n_train=60, p=20, seed=8)
+    for fit in (
+        lambda alpha, **kw: LinearRFE(alpha=alpha, step=0.2, **kw).fit(X_train, y_train),
+        lambda alpha, **kw: LinearPPOP(alpha=alpha, step=0.2, **kw).fit(X_train, y_train, X_valid, y_valid),
+    ):
+        scheduled = fit("loo_schedule", switch_at=switch_at)
+        reference = fit(plain)
+        pd.testing.assert_frame_equal(scheduled.ranking_frame(), reference.ranking_frame())
+        assert scheduled.history_["alpha"].tolist() == reference.history_["alpha"].tolist()
+
+
+def test_ppop_loo_schedule_matches_refitting_with_the_same_alphas():
+    from src.models.linear_selection import loo_alpha, ridge_spectrum
+
+    X_train, y_train, X_valid, y_valid = _data(n_train=60, p=12, seed=9)
+    ours = LinearPPOP(alpha="loo_schedule", step=0.25, switch_at=6).fit(X_train, y_train, X_valid, y_valid)
+    scaled = pd.DataFrame(StandardScaler().fit_transform(X_train), columns=X_train.columns)
+    target = y_train.to_numpy() - y_train.mean()
+    frame = ours.ranking_frame().set_index("Feature")
+    remaining = list(X_train.columns)
+    for n_features, alpha, mse in zip(ours.history_["n_features"], ours.history_["alpha"], ours.history_["mse"]):
+        u, s2, _ = ridge_spectrum(scaled[remaining].to_numpy())
+        assert alpha == pytest.approx(loo_alpha(u, s2, target, rule="1se" if n_features > 6 else "min"))
+        full = _model(alpha).fit(X_train[remaining], y_train)
+        assert mse == pytest.approx(mean_squared_error(y_valid, full.predict(X_valid[remaining])), rel=1e-9)
+        packet = frame.index[frame["Group_Rank"] == frame.loc[remaining, "Group_Rank"].max()].tolist()
+        for feature in packet:
+            kept = [f for f in remaining if f != feature]
+            if kept:
+                predicted = _model(alpha).fit(X_train[kept], y_train).predict(X_valid[kept])
+            else:
+                predicted = np.full(len(y_valid), y_train.mean())
+            increase = mean_squared_error(y_valid, predicted) - mse
+            assert frame.loc[feature, "Score"] == pytest.approx(increase, rel=1e-7, abs=1e-10)
+        remaining = [f for f in remaining if f not in packet]
+    assert ours.history_["alpha"].nunique() > 1
+
+
+def test_bad_switch_at_is_rejected():
+    for bad in (-1, 1.5, True):
+        with pytest.raises(ValueError):
+            LinearRFE(alpha="loo_schedule", switch_at=bad)

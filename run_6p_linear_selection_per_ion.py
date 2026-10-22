@@ -9,6 +9,7 @@ RFE: выбрасывается пакет с наименьшими |β| Ridge 
 --alpha 0 — МНК без штрафа (только если признаков меньше строк).
 --alpha loo — штраф подбирается на каждой итерации leave-one-out на train.
 --alpha loo1se — то же по правилу одной стандартной ошибки (штраф побольше).
+--alpha loo_schedule — правило 1SE, пока признаков больше --switch-at, дальше минимум LOO.
 
 Затем одновыходной персептрон на первых k признаках рейтинга, шаг 500, 3 seed.
 Персептрон учится на train, останавливается по validation, R² — на test.
@@ -35,7 +36,7 @@ try:
 except Exception:
     pass
 
-from src.models.linear_selection import LinearPPOP, LinearRFE, check_step
+from src.models.linear_selection import LOO_MODES, LinearPPOP, LinearRFE, check_step
 from src.models.neural_network import to_excel_optimized_OLP
 from src.models.ridge_rfe import plot_r2_curves
 
@@ -46,25 +47,29 @@ N_TRAIN, N_VALID = 2225, 600
 
 
 def parse_alpha(text: str):
-    if text in ("loo", "loo1se"):
+    if text in LOO_MODES:
         return text
     value = float(text)
     if value < 0:
-        raise argparse.ArgumentTypeError("alpha должен быть >= 0, loo или loo1se")
+        raise argparse.ArgumentTypeError("alpha должен быть >= 0, loo, loo1se или loo_schedule")
     return value
 
 
-def model_tag(alpha) -> str:
-    if alpha in ("loo", "loo1se"):
+def model_tag(alpha, switch_at: int = 500) -> str:
+    if alpha == "loo_schedule":
+        return f"ridge_loosched{switch_at}"
+    if alpha in LOO_MODES:
         return f"ridge_{alpha}"
     return "ols" if alpha == 0 else f"ridge_a{alpha:g}"
 
 
-def model_title(alpha) -> str:
+def model_title(alpha, switch_at: int = 500) -> str:
     if alpha == "loo":
         return "Ridge, alpha по LOO на каждой итерации"
     if alpha == "loo1se":
         return "Ridge, alpha по LOO (правило 1SE) на каждой итерации"
+    if alpha == "loo_schedule":
+        return f"Ridge, alpha по LOO: 1SE выше {switch_at} признаков, минимум ниже"
     return "МНК" if alpha == 0 else f"Ridge alpha={alpha:g}"
 
 
@@ -76,7 +81,7 @@ def parse_step(text: str):
 
 
 def out_dir(args) -> Path:
-    name = f"6p_{args.method}_{model_tag(args.alpha)}_step{args.step:g}"
+    name = f"6p_{args.method}_{model_tag(args.alpha, args.switch_at)}_step{args.step:g}"
     if args.method == "ppop":
         name += f"_{args.score_on}" + (str(args.cv) if args.score_on == "cv" else "")
         if args.reshuffle and args.score_on == "cv":
@@ -85,7 +90,7 @@ def out_dir(args) -> Path:
 
 
 def title(args) -> str:
-    model = model_title(args.alpha)
+    model = model_title(args.alpha, args.switch_at)
     packet = "пакет 1" if args.step == 1 else (f"пакет {args.step:g}" if args.step > 1 else f"пакет {args.step:g} от остатка")
     if args.method == "rfe":
         return f"RFE, {model}, {packet}"
@@ -123,12 +128,15 @@ def rank_ion(args, directory: Path, X: pd.DataFrame, y: pd.Series) -> pd.DataFra
     X_train, y_train = X.iloc[:N_TRAIN], y.iloc[:N_TRAIN]
     print(args.ion, title(args), "start", X_train.shape, flush=True)
     if args.method == "rfe":
-        selector = LinearRFE(alpha=args.alpha, step=args.step).fit(X_train, y_train)
+        selector = LinearRFE(alpha=args.alpha, step=args.step, switch_at=args.switch_at).fit(X_train, y_train)
     elif args.score_on == "valid":
         X_valid, y_valid = X.iloc[N_TRAIN:N_TRAIN + N_VALID], y.iloc[N_TRAIN:N_TRAIN + N_VALID]
-        selector = LinearPPOP(alpha=args.alpha, step=args.step).fit(X_train, y_train, X_valid, y_valid)
+        selector = LinearPPOP(alpha=args.alpha, step=args.step, switch_at=args.switch_at)
+        selector.fit(X_train, y_train, X_valid, y_valid)
     else:
-        selector = LinearPPOP(alpha=args.alpha, step=args.step, cv=args.cv, reshuffle=args.reshuffle).fit(X_train, y_train)
+        selector = LinearPPOP(
+            alpha=args.alpha, step=args.step, cv=args.cv, reshuffle=args.reshuffle, switch_at=args.switch_at
+        ).fit(X_train, y_train)
     selector.history_.to_csv(ion_dir / "history.csv", index=False)
     (ion_dir / "selection.json").write_text(
         json.dumps({"title": title(args), "seconds": selector.elapsed_seconds_}, ensure_ascii=False, indent=2),
@@ -212,7 +220,8 @@ def train_curve(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", required=True, choices=["ppop", "rfe"])
-    parser.add_argument("--alpha", type=parse_alpha, default=700.0, help="число >= 0, loo или loo1se")
+    parser.add_argument("--alpha", type=parse_alpha, default=700.0, help="число >= 0, loo, loo1se или loo_schedule")
+    parser.add_argument("--switch-at", type=int, default=500, help="loo_schedule: при скольких признаках перейти на минимум LOO")
     parser.add_argument("--step", type=parse_step, default=None, help="по умолчанию: ППОП 0.1, RFE 1")
     parser.add_argument("--score-on", choices=["cv", "valid"], default="cv")
     parser.add_argument("--cv", type=int, default=5)
