@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.feature_selection import RFE
-from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.linear_model import LinearRegression, Ridge, RidgeCV
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import KFold
 from sklearn.pipeline import make_pipeline
@@ -133,3 +133,53 @@ def test_rfe_fraction_matches_refitting_loop():
     frame = ours.ranking_frame()
     groups = [set(frame.loc[frame["Group_Rank"] == g, "Feature"]) for g in sorted(frame["Group_Rank"].unique())]
     assert groups == list(reversed(dropped_order))
+
+
+def test_loo_alpha_is_chosen_per_iteration():
+    X_train, y_train, X_valid, y_valid = _data(n_train=60, p=12)
+    selector = LinearPPOP(alpha="loo", step=0.25).fit(X_train, y_train, X_valid, y_valid)
+    assert selector.history_["alpha"].gt(0).all()
+    scaled = StandardScaler().fit_transform(X_train)
+    reference = RidgeCV(alphas=np.logspace(-3, 6, 46)).fit(scaled, y_train)
+    assert selector.history_["alpha"].iloc[0] == pytest.approx(reference.alpha_)
+    rfe = LinearRFE(alpha="loo", step=0.25).fit(X_train, y_train)
+    assert rfe.history_["alpha"].iloc[0] == pytest.approx(reference.alpha_)
+
+
+def test_rfe_with_loo_alpha_matches_refitting_with_the_same_alphas():
+    X_train, y_train, _, _ = _data(n_train=50, p=15, seed=5)
+    ours = LinearRFE(alpha="loo", step=1, refresh_every=1).fit(X_train, y_train)
+    scaled = pd.DataFrame(StandardScaler().fit_transform(X_train), columns=X_train.columns)
+    remaining = list(X_train.columns)
+    dropped = []
+    for alpha in ours.history_["alpha"]:
+        coef = np.abs(Ridge(alpha=alpha).fit(scaled[remaining], y_train).coef_)
+        dropped.append(remaining.pop(int(np.argmin(coef))))
+    order = ours.ranking_frame().sort_values("Individual_Rank", ascending=False)["Feature"].tolist()
+    assert order == dropped
+    assert ours.history_["alpha"].nunique() > 1
+
+
+def test_one_se_rule_never_picks_smaller_alpha_than_minimum():
+    from src.models.linear_selection import loo_alpha, ridge_spectrum
+
+    X_train, y_train, _, _ = _data(n_train=60, p=30, seed=6)
+    scaled = StandardScaler().fit_transform(X_train)
+    u, s2, _ = ridge_spectrum(scaled)
+    target = y_train.to_numpy() - y_train.mean()
+    best = loo_alpha(u, s2, target, rule="min")
+    one_se = loo_alpha(u, s2, target, rule="1se")
+    assert one_se >= best
+    selector = LinearRFE(alpha="loo1se", step=0.25).fit(X_train, y_train)
+    assert selector.history_["alpha"].iloc[0] == pytest.approx(one_se)
+
+
+def test_ppop_reshuffle_uses_new_folds_each_iteration():
+    X_train, y_train, _, _ = _data(n_train=80, p=10, seed=7)
+    fixed = LinearPPOP(alpha=3.0, step=10, cv=4, random_state=1, reshuffle=True).fit(X_train, y_train)
+    plain = LinearPPOP(alpha=3.0, step=10, cv=4, random_state=1).fit(X_train, y_train)
+    # Одна итерация: при том же seed результаты совпадают.
+    pd.testing.assert_frame_equal(fixed.ranking_frame(), plain.ranking_frame())
+    several = LinearPPOP(alpha=3.0, step=0.3, cv=4, random_state=1, reshuffle=True).fit(X_train, y_train)
+    assert sorted(several.ranking_frame()["Individual_Rank"]) == list(range(1, 11))
+    assert several.history_["mse"].iloc[0] == pytest.approx(plain.history_["mse"].iloc[0])

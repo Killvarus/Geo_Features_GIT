@@ -14,6 +14,14 @@
 
 Пакет задаётся как в sklearn.feature_selection.RFE: целое — число признаков,
 дробь из (0, 1) — доля от оставшихся (округление вверх, не меньше одного).
+
+alpha="loo": штраф подбирается заново на каждой итерации (в RFE — при каждом
+переобращении матрицы) по leave-one-out ошибке Ridge на всём train, как в RidgeCV.
+Оптимальный штраф для 100 признаков другой, чем для 5427.
+alpha="loo1se": то же, но берётся самый большой штраф, чья LOO-ошибка не больше
+минимальной плюс одна её стандартная ошибка (правило одной SE, как lambda.1se
+в glmnet). При тысяче скоррелированных каналов минимум LOO даёт почти МНК,
+и решения о выбрасывании становятся шумом; правило 1SE держит штраф выше.
 """
 from __future__ import annotations
 
@@ -52,11 +60,75 @@ def packet_size(n_remaining: int, step, min_step: int = 1) -> int:
     return min(n_remaining, max(size, int(min_step), 1))
 
 
-def _check_alpha(alpha: float) -> float:
+LOO_ALPHAS = np.logspace(-3, 6, 46)
+
+
+def _check_alpha(alpha) -> float | str:
+    if isinstance(alpha, str):
+        if alpha not in ("loo", "loo1se"):
+            raise ValueError('alpha должен быть числом >= 0, "loo" или "loo1se"')
+        return alpha
     alpha = float(alpha)
     if not alpha >= 0.0:
         raise ValueError("alpha должен быть >= 0")
     return alpha
+
+
+def ridge_spectrum(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """
+    U, s² и V из SVD X = U·S·Vᵀ через собственное разложение меньшей из XᵀX и XXᵀ.
+    Нулевые сингулярные числа отброшены. V возвращается только при k ≤ n.
+    """
+    n, k = X.shape
+    if k <= n:
+        s2, v = np.linalg.eigh(X.T @ X)
+    else:
+        s2, u = np.linalg.eigh(X @ X.T)
+    s2 = np.clip(s2, 0.0, None)
+    keep = s2 > s2.max() * 1e-12
+    s2 = s2[keep]
+    if k <= n:
+        v = v[:, keep]
+        return (X @ v) / np.sqrt(s2), s2, v
+    return u[:, keep], s2, None
+
+
+def loo_alpha(
+    u: np.ndarray, s2: np.ndarray, target: np.ndarray, alphas: np.ndarray = LOO_ALPHAS, rule: str = "min"
+) -> float:
+    """
+    alpha по leave-one-out ошибке Ridge (центрированный y, свободный член).
+    rule="min" — наименьшая ошибка, rule="1se" — самый большой alpha с ошибкой
+    не больше минимума плюс стандартная ошибка этого минимума.
+
+    При d = s² / (s² + alpha): остаток e = y − U·diag(d)·Uᵀy, рычаг hᵢ = Σⱼ Uᵢⱼ²dⱼ + 1/n,
+    ошибка без i-й строки eᵢ / (1 − hᵢ). Части вне столбцов U не зависят от alpha
+    и считаются один раз: при малом alpha вычитание 1 − hᵢ напрямую теряет точность.
+    """
+    n = len(target)
+    projected = u.T @ target
+    u_squared = u**2
+    outside = target - u @ projected
+    outside_leverage = 1.0 - 1.0 / n - u_squared.sum(axis=1)
+    if rule not in ("min", "1se"):
+        raise ValueError('rule должен быть "min" или "1se"')
+    means, errors = [], []
+    for alpha in alphas:
+        shrink = alpha / (s2 + alpha)
+        residual = u @ (shrink * projected) + outside
+        one_minus_leverage = u_squared @ shrink + outside_leverage
+        squared = (residual / one_minus_leverage) ** 2
+        means.append(float(squared.mean()))
+        errors.append(float(squared.std(ddof=1) / np.sqrt(n)))
+    best = int(np.argmin(means))
+    if rule == "min":
+        return float(alphas[best])
+    limit = means[best] + errors[best]
+    return float(max(alpha for alpha, mean in zip(alphas, means) if mean <= limit))
+
+
+def _loo_rule(alpha: str) -> str:
+    return "1se" if alpha == "loo1se" else "min"
 
 
 def _as_target(y, n_rows: int) -> np.ndarray:
@@ -174,9 +246,20 @@ class LinearPPOP(_SelectorBase):
     Оценочная выборка: если в fit переданы X_eval, y_eval — MSE считается на них
     (например, на validation). Иначе — K-fold на переданном train, cv фолдов.
     Score признака — на сколько выросла MSE без него в момент выбрасывания.
+
+    reshuffle=True: на каждой итерации свои случайные фолды. Иначе тысячи решений
+    принимаются по одному и тому же разбиению, и отбор подстраивается под его шум.
     """
 
-    def __init__(self, alpha: float = 0.0, step=0.1, min_step: int = 1, cv: int = 5, random_state: int = 0):
+    def __init__(
+        self,
+        alpha: float | str = 0.0,
+        step=0.1,
+        min_step: int = 1,
+        cv: int = 5,
+        random_state: int = 0,
+        reshuffle: bool = False,
+    ):
         check_step(step)
         if cv < 2:
             raise ValueError("cv должен быть >= 2")
@@ -185,14 +268,16 @@ class LinearPPOP(_SelectorBase):
         self.min_step = int(min_step)
         self.cv = int(cv)
         self.random_state = random_state
+        self.reshuffle = bool(reshuffle)
         self.ranking_ = None
         self.history_ = None
         self.elapsed_seconds_ = None
 
-    def _splits(self, X: np.ndarray, y: np.ndarray, X_eval, y_eval) -> list[_Split]:
+    def _splits(self, X: np.ndarray, y: np.ndarray, X_eval, y_eval, seed=None) -> list[_Split]:
         if X_eval is not None:
             return [_Split(X, y, np.asarray(X_eval, dtype=float), _as_target(y_eval, len(X_eval)))]
-        folds = KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
+        seed = self.random_state if seed is None else seed
+        folds = KFold(n_splits=self.cv, shuffle=True, random_state=seed)
         return [_Split(X[fit], y[fit], X[held], y[held]) for fit, held in folds.split(X)]
 
     def fit(self, X: pd.DataFrame, y, X_eval: pd.DataFrame | None = None, y_eval=None) -> "LinearPPOP":
@@ -202,8 +287,14 @@ class LinearPPOP(_SelectorBase):
             raise ValueError("Колонки train и оценочной выборки должны совпадать и идти в одном порядке")
         names: list[Hashable] = list(X.columns)
         started = time.perf_counter()
-        splits = self._splits(X.to_numpy(dtype=float), _as_target(y, len(X)), X_eval, y_eval)
-        n_eval = sum(split.n_eval for split in splits)
+        values = X.to_numpy(dtype=float)
+        target = _as_target(y, len(X))
+        reshuffle = self.reshuffle and X_eval is None
+        splits = None if reshuffle else self._splits(values, target, X_eval, y_eval)
+        n_eval = len(target) if reshuffle else sum(split.n_eval for split in splits)
+        if isinstance(self.alpha, str):
+            (scaled,) = _standardize(values)
+            centered = target - target.mean()
 
         remaining = np.arange(len(names))
         packets: list[list[int]] = []
@@ -211,10 +302,22 @@ class LinearPPOP(_SelectorBase):
         history = []
         while remaining.size:
             step_started = time.perf_counter()
+            if isinstance(self.alpha, str):
+                u, s2, _ = ridge_spectrum(scaled[:, remaining])
+                alpha = loo_alpha(u, s2, centered, rule=_loo_rule(self.alpha))
+            else:
+                alpha = self.alpha
             sse = np.zeros(remaining.size)
             base = 0.0
-            for split in splits:
-                part, part_base = split.sse_without_each(remaining, self.alpha)
+            if reshuffle:
+                # Новые фолды строятся только по оставшимся признакам.
+                seed = None if self.random_state is None else self.random_state + len(history)
+                current = self._splits(values[:, remaining], target, None, None, seed)
+                columns = np.arange(remaining.size)
+            else:
+                current, columns = splits, remaining
+            for split in current:
+                part, part_base = split.sse_without_each(columns, alpha)
                 sse += part
                 base += part_base
             mse_full = base / n_eval
@@ -228,13 +331,14 @@ class LinearPPOP(_SelectorBase):
             history.append(
                 {
                     "n_features": int(remaining.size),
+                    "alpha": alpha,
                     "mse": mse_full,
                     "dropped": size,
                     "seconds": time.perf_counter() - step_started,
                 }
             )
             print(
-                f"PPOP {len(history)}: features {remaining.size}, mse {mse_full:.6g}, "
+                f"PPOP {len(history)}: features {remaining.size}, alpha {alpha:g}, mse {mse_full:.6g}, "
                 f"dropped {size}, step_s {history[-1]['seconds']:.1f}",
                 flush=True,
             )
@@ -255,7 +359,7 @@ class LinearRFE(_SelectorBase):
     пересчитывается заново, чтобы не копилась ошибка округления.
     """
 
-    def __init__(self, alpha: float = 700.0, step=1, min_step: int = 1, refresh_every: int = 256):
+    def __init__(self, alpha: float | str = 700.0, step=1, min_step: int = 1, refresh_every: int = 256):
         check_step(step)
         if refresh_every < 1:
             raise ValueError("refresh_every должен быть >= 1")
@@ -276,9 +380,16 @@ class LinearRFE(_SelectorBase):
         xty = scaled.T @ (target - target.mean())
         n_rows = len(target)
 
+        def choose_alpha(columns: np.ndarray) -> float:
+            if not isinstance(self.alpha, str):
+                return self.alpha
+            u, s2, _ = ridge_spectrum(scaled[:, columns])
+            return loo_alpha(u, s2, target - target.mean(), rule=_loo_rule(self.alpha))
+
         # block — признаки, по которым построена inverse; active — ещё не выброшенные из block.
         block = np.arange(len(names))
-        inverse = _inverse(gram, self.alpha, n_rows)
+        alpha = choose_alpha(block)
+        inverse = _inverse(gram, alpha, n_rows)
         active = np.ones(block.size, dtype=bool)
         since_refresh = 0
         packets: list[list[int]] = []
@@ -287,6 +398,7 @@ class LinearRFE(_SelectorBase):
         while active.any():
             step_started = time.perf_counter()
             # У выброшенных строки и столбцы inverse обнулены, их β тоже 0.
+            used_alpha = alpha
             beta = inverse @ xty[block]
             positions = np.flatnonzero(active)
             weights = np.abs(beta[positions])
@@ -301,13 +413,15 @@ class LinearRFE(_SelectorBase):
                 if since_refresh >= self.refresh_every:
                     block = block[active]
                     active = np.ones(block.size, dtype=bool)
-                    inverse = _inverse(gram[np.ix_(block, block)], self.alpha, n_rows)
+                    alpha = choose_alpha(block)
+                    inverse = _inverse(gram[np.ix_(block, block)], alpha, n_rows)
                     since_refresh = 0
                 else:
                     inverse = self._downdate(inverse, drop)
             history.append(
                 {
                     "n_features": int(positions.size),
+                    "alpha": used_alpha,
                     "dropped": size,
                     "smallest_abs_coef": float(weights.min()),
                     "seconds": time.perf_counter() - step_started,
@@ -315,7 +429,7 @@ class LinearRFE(_SelectorBase):
             )
             if len(history) % 250 == 1 or not active.any() or size > 1:
                 print(
-                    f"RFE {len(history)}: features {positions.size}, dropped {size}, "
+                    f"RFE {len(history)}: features {positions.size}, alpha {used_alpha:g}, dropped {size}, "
                     f"smallest_abs_coef {weights.min():.6g}, step_s {history[-1]['seconds']:.2f}",
                     flush=True,
                 )

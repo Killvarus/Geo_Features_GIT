@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
@@ -123,3 +124,54 @@ def save_selection_map(
     fig.savefig(path, dpi=140, bbox_inches="tight")
     plt.close(fig)
     return coords
+
+
+def top_features(ranking: pd.DataFrame, k: int) -> list[str]:
+    """Первые k каналов рейтинга по Individual_Rank."""
+    if k < 1:
+        raise ValueError("k должен быть >= 1")
+    ordered = ranking.sort_values("Individual_Rank")
+    return ordered["Feature"].astype(str).head(k).tolist()
+
+
+def save_selection_grid(
+    matrix: np.ndarray,
+    panels: list[tuple[str, list[str]]],
+    title: str,
+    path: str | Path,
+    ncols: int = 3,
+) -> None:
+    """Несколько карт на одной фигуре: средний спектр и отобранные каналы на каждой панели."""
+    if matrix.shape != (N_EXC, N_EM):
+        raise ValueError(f"матрица {matrix.shape}, нужна {(N_EXC, N_EM)}")
+    if not panels:
+        raise ValueError("нет панелей")
+    nrows = math.ceil(len(panels) / ncols)
+    vmin, vmax = color_limits(matrix)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 4.3 * nrows), squeeze=False)
+    extent = (EM_NM[0] - 0.5, EM_NM[-1] + 0.5, EXC_NM[0] - 2.5, EXC_NM[-1] + 2.5)
+    for ax, (label, features) in zip(axes.ravel(), panels):
+        ax.imshow(matrix, origin="lower", aspect="auto", cmap="turbo", vmin=vmin, vmax=vmax, extent=extent)
+        coords = [channel_coordinates(feature) for feature in features]
+        if coords:
+            ax.scatter(
+                [c[1] for c in coords],
+                [c[0] for c in coords],
+                s=10,
+                c="white",
+                edgecolors="black",
+                linewidths=0.3,
+                zorder=3,
+            )
+        ax.set_title(label, fontsize=10)
+        ax.set_xlabel("Испускание, нм", fontsize=8)
+        ax.set_ylabel("Возбуждение, нм", fontsize=8)
+        ax.tick_params(labelsize=7)
+    for ax in axes.ravel()[len(panels):]:
+        ax.axis("off")
+    fig.suptitle(title, y=1.0)
+    fig.tight_layout()
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)

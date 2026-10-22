@@ -7,6 +7,8 @@ RFE: выбрасывается пакет с наименьшими |β| Ridge 
 
 --step: целое — фиксированный пакет, дробь из (0, 1) — доля оставшихся признаков.
 --alpha 0 — МНК без штрафа (только если признаков меньше строк).
+--alpha loo — штраф подбирается на каждой итерации leave-one-out на train.
+--alpha loo1se — то же по правилу одной стандартной ошибки (штраф побольше).
 
 Затем одновыходной персептрон на первых k признаках рейтинга, шаг 500, 3 seed.
 Персептрон учится на train, останавливается по validation, R² — на test.
@@ -43,6 +45,29 @@ TARGETS = ["Cu", "Ni", "Al", "Co", "Cr", "NO3"]
 N_TRAIN, N_VALID = 2225, 600
 
 
+def parse_alpha(text: str):
+    if text in ("loo", "loo1se"):
+        return text
+    value = float(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("alpha должен быть >= 0, loo или loo1se")
+    return value
+
+
+def model_tag(alpha) -> str:
+    if alpha in ("loo", "loo1se"):
+        return f"ridge_{alpha}"
+    return "ols" if alpha == 0 else f"ridge_a{alpha:g}"
+
+
+def model_title(alpha) -> str:
+    if alpha == "loo":
+        return "Ridge, alpha по LOO на каждой итерации"
+    if alpha == "loo1se":
+        return "Ridge, alpha по LOO (правило 1SE) на каждой итерации"
+    return "МНК" if alpha == 0 else f"Ridge alpha={alpha:g}"
+
+
 def parse_step(text: str):
     value = float(text)
     step = int(value) if value >= 1 and value.is_integer() else value
@@ -51,15 +76,16 @@ def parse_step(text: str):
 
 
 def out_dir(args) -> Path:
-    model = "ols" if args.alpha == 0 else f"ridge_a{args.alpha:g}"
-    name = f"6p_{args.method}_{model}_step{args.step:g}"
+    name = f"6p_{args.method}_{model_tag(args.alpha)}_step{args.step:g}"
     if args.method == "ppop":
         name += f"_{args.score_on}" + (str(args.cv) if args.score_on == "cv" else "")
+        if args.reshuffle and args.score_on == "cv":
+            name += "_reshuffle"
     return ROOT / "experiments" / name
 
 
 def title(args) -> str:
-    model = "МНК" if args.alpha == 0 else f"Ridge alpha={args.alpha:g}"
+    model = model_title(args.alpha)
     packet = "пакет 1" if args.step == 1 else (f"пакет {args.step:g}" if args.step > 1 else f"пакет {args.step:g} от остатка")
     if args.method == "rfe":
         return f"RFE, {model}, {packet}"
@@ -102,7 +128,7 @@ def rank_ion(args, directory: Path, X: pd.DataFrame, y: pd.Series) -> pd.DataFra
         X_valid, y_valid = X.iloc[N_TRAIN:N_TRAIN + N_VALID], y.iloc[N_TRAIN:N_TRAIN + N_VALID]
         selector = LinearPPOP(alpha=args.alpha, step=args.step).fit(X_train, y_train, X_valid, y_valid)
     else:
-        selector = LinearPPOP(alpha=args.alpha, step=args.step, cv=args.cv).fit(X_train, y_train)
+        selector = LinearPPOP(alpha=args.alpha, step=args.step, cv=args.cv, reshuffle=args.reshuffle).fit(X_train, y_train)
     selector.history_.to_csv(ion_dir / "history.csv", index=False)
     (ion_dir / "selection.json").write_text(
         json.dumps({"title": title(args), "seconds": selector.elapsed_seconds_}, ensure_ascii=False, indent=2),
@@ -113,7 +139,9 @@ def rank_ion(args, directory: Path, X: pd.DataFrame, y: pd.Series) -> pd.DataFra
     return selector.ranking_frame()
 
 
-def train_curve(directory: Path, ion: str, X: pd.DataFrame, y: pd.Series, ranking: pd.DataFrame) -> None:
+def train_curve(
+    directory: Path, ion: str, X: pd.DataFrame, y: pd.Series, ranking: pd.DataFrame, ks: list[int] | None = None
+) -> None:
     ion_dir = directory / ion
     points_path = ion_dir / "curve_points.json"
     done = {}
@@ -122,7 +150,7 @@ def train_curve(directory: Path, ion: str, X: pd.DataFrame, y: pd.Series, rankin
     ordered = ranking.sort_values("Individual_Rank")["Feature"].tolist()
     points = []
     y_df = y.to_frame()
-    for k in k_grid(X.shape[1]):
+    for k in ks or k_grid(X.shape[1]):
         if k in done and len(done[k].get("runs", [])) == 3:
             points.append(done[k])
             print(ion, "skip k", k, flush=True)
@@ -155,27 +183,45 @@ def train_curve(directory: Path, ion: str, X: pd.DataFrame, y: pd.Series, rankin
             log_file=str(run_dir / "training.log"),
             enable_cv=False,
         )
-        runs = [{"seed": 42 + i, "r2": float(result["test"].loc["Оценка1", "R2"])} for i, result in enumerate(results)]
+        # best_val_loss — MSE на validation в единицах y, стандартизованного по train.
+        variance_ratio = float(np.var(y.iloc[:N_TRAIN]) / np.var(y.iloc[N_TRAIN:N_TRAIN + N_VALID]))
+        runs = [
+            {
+                "seed": 42 + i,
+                "r2": float(result["test"].loc["Оценка1", "R2"]),
+                "r2_valid": 1.0 - float(result["history"]["best_val_loss"]) * variance_ratio,
+                "epochs": int(result["history"]["stopped_epoch"]),
+            }
+            for i, result in enumerate(results)
+        ]
         r2s = [item["r2"] for item in runs]
-        point = {"k": k, "runs": runs, "mean": float(np.mean(r2s)), "std": float(np.std(r2s, ddof=1))}
+        point = {
+            "k": k,
+            "runs": runs,
+            "mean": float(np.mean(r2s)),
+            "std": float(np.std(r2s, ddof=1)),
+            "mean_valid": float(np.mean([item["r2_valid"] for item in runs])),
+        }
         points.append(point)
-        points_path.write_text(json.dumps(points, indent=2), encoding="utf-8")
+        done[k] = point
+        merged = sorted(done.values(), key=lambda item: item["k"])
+        points_path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
         print(ion, "k", k, "R2", round(point["mean"], 4), "±", round(point["std"], 4), flush=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", required=True, choices=["ppop", "rfe"])
-    parser.add_argument("--alpha", type=float, default=700.0)
+    parser.add_argument("--alpha", type=parse_alpha, default=700.0, help="число >= 0, loo или loo1se")
     parser.add_argument("--step", type=parse_step, default=None, help="по умолчанию: ППОП 0.1, RFE 1")
     parser.add_argument("--score-on", choices=["cv", "valid"], default="cv")
     parser.add_argument("--cv", type=int, default=5)
+    parser.add_argument("--reshuffle", action="store_true", help="ППОП: новые фолды на каждой итерации")
     parser.add_argument("--ion", choices=TARGETS)
+    parser.add_argument("--ks", type=int, nargs="+", help="свои k вместо 500, 1000, …, 5427")
     parser.add_argument("--rank-only", action="store_true")
     parser.add_argument("--plot-only", action="store_true")
     args = parser.parse_args()
-    if args.alpha < 0:
-        parser.error("alpha должен быть >= 0")
     if args.step is None:
         args.step = 0.1 if args.method == "ppop" else 1
     directory = out_dir(args)
@@ -188,7 +234,7 @@ def main() -> None:
     ranking = rank_ion(args, directory, X, y)
     if args.rank_only:
         return
-    train_curve(directory, args.ion, X, y, ranking)
+    train_curve(directory, args.ion, X, y, ranking, args.ks)
     plot_r2_curves(directory, TARGETS, title(args))
     print(args.ion, "finished", flush=True)
 
