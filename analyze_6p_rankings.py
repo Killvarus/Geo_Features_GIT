@@ -50,6 +50,16 @@ RANKING_DIRS = {
     "ppop_cv_loo": "6p_ppop_ridge_loo_step0.1_cv5",
     "rfe_1_loo": "6p_rfe_ridge_loo_step1",
     "rfe_0.1_loo": "6p_rfe_ridge_loo_step0.1",
+    "rfe_0.1_1se": "6p_rfe_ridge_loo1se_step0.1",
+    "ppop_cv_1se": "6p_ppop_ridge_loo1se_step0.1_cv5",
+    "ppop_cv_1se_reshuffle": "6p_ppop_ridge_loo1se_step0.1_cv5_reshuffle",
+    "rfe_0.1_1se_bag5": "6p_rfe_ridge_loo1se_step0.1_bag5",
+    "rfe_s5": "6p_rfe_ridge_a700_step0.1_spaced5",
+    "rfe_s10": "6p_rfe_ridge_a700_step0.1_spaced10",
+    "rfe_s20": "6p_rfe_ridge_a700_step0.1_spaced20",
+    "ppop_s5": "6p_ppop_ridge_a700_step0.1_cv5_spaced5",
+    "ppop_s10": "6p_ppop_ridge_a700_step0.1_cv5_spaced10",
+    "ppop_s20": "6p_ppop_ridge_a700_step0.1_cv5_spaced20",
 }
 BASELINES = ["random", "corr", "ridge_once", "uniform"]
 

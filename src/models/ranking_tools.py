@@ -53,3 +53,27 @@ def spaced_ranking(ranking: pd.DataFrame, min_distance_nm: float) -> pd.DataFram
             "Score": [-original[f] for f in features],
         }
     )
+
+
+def aggregate_rankings(rankings: list[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Общий рейтинг по нескольким: канал ставится по среднему Individual_Rank
+    (при равенстве — по имени). Score — минус средний ранг.
+    """
+    if not rankings:
+        raise ValueError("нет рейтингов")
+    frames = [r.set_index(r["Feature"].astype(str))["Individual_Rank"] for r in rankings]
+    features = set(frames[0].index)
+    if any(set(f.index) != features for f in frames):
+        raise ValueError("рейтинги должны содержать одни и те же каналы")
+    mean_rank = pd.concat(frames, axis=1).mean(axis=1)
+    ordered = sorted(mean_rank.index, key=lambda f: (mean_rank[f], f))
+    ranks = np.arange(1, len(ordered) + 1)
+    return pd.DataFrame(
+        {
+            "Feature": ordered,
+            "Group_Rank": ranks,
+            "Individual_Rank": ranks,
+            "Score": [-float(mean_rank[f]) for f in ordered],
+        }
+    )

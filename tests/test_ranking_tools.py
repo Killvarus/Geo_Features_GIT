@@ -23,3 +23,13 @@ def test_spaced_ranking_has_consecutive_ranks():
     assert frame["Feature"].tolist() == ["E350_em450", "E300_em500", "E350_em451"]
     assert frame["Individual_Rank"].tolist() == [1, 2, 3]
     assert frame["Score"].tolist() == [-1, -3, -2]
+
+
+def test_aggregate_orders_by_mean_rank():
+    from src.models.ranking_tools import aggregate_rankings
+
+    a = pd.DataFrame({"Feature": ["x", "y", "z"], "Individual_Rank": [1, 2, 3]})
+    b = pd.DataFrame({"Feature": ["y", "x", "z"], "Individual_Rank": [1, 3, 2]})
+    frame = aggregate_rankings([a, b])
+    assert frame["Feature"].tolist() == ["y", "x", "z"]
+    assert frame["Score"].tolist() == [-1.5, -2.0, -2.5]
