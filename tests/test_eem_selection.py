@@ -87,3 +87,21 @@ def test_save_parts_map_writes_png(tmp_path):
     save_parts_grid(spectrum, [("a", parts), ("b", parts)], "проверка", tmp_path / "grid.png")
     assert (tmp_path / "map.png").stat().st_size > 1000
     assert (tmp_path / "grid.png").stat().st_size > 1000
+
+
+def test_plot_top_draws_first_k_channels_per_ion(tmp_path, monkeypatch):
+    import plot_6p_selection_eem as script
+
+    root = tmp_path / "root"
+    folder = root / "experiments" / "6p_fake" / "Cu"
+    folder.mkdir(parents=True)
+    pd.DataFrame(
+        {"Feature": ["E280_em375", "E410_em575", "E350_em450"], "Group_Rank": [3, 1, 2], "Individual_Rank": [1, 2, 3]}
+    ).to_csv(folder / "ranking.csv", index=False)
+    cache = tmp_path / "xy.npz"
+    np.savez(cache, X=np.ones((2300, 27 * 201)))
+    monkeypatch.setattr(script, "ROOT", root)
+    saved, missing = script.plot_top(2, ["6p_fake"], cache=cache, out_dir=tmp_path / "out")
+    assert saved == 1
+    assert missing == 5
+    assert (tmp_path / "out" / "6p_fake" / "Cu_top2.png").stat().st_size > 1000

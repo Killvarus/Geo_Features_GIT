@@ -8,6 +8,11 @@
 каждый канал окрашивается номером своей части. Картинки — в
 experiments/6p_selection_eem/parts<N>/<папка>/<ион>.png и all_ions.png.
 
+--top K [--methods папка ...]: как в основном режиме, но вместо первой группы —
+первые K каналов рейтинга (у отборов с пакетом 10% или 1 первая группа — это
+один канал). По умолчанию — три текущих отбора с alpha=700. Картинки —
+experiments/6p_selection_eem/<папка>/<ион>_top<K>.png.
+
 --parts N --data-order: то же, но вместо рейтинга — порядок колонок в самом
 массиве данных (колонки 1…5427 кэша). Он одинаков для всех ионов, поэтому
 картинка одна: experiments/6p_selection_eem/parts<N>/data_order.png.
@@ -35,6 +40,7 @@ from src.visualization.eem_selection import (
     save_parts_grid,
     save_parts_map,
     save_selection_map,
+    top_features,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -80,6 +86,33 @@ def plot_available(cache: Path = CACHE, out_dir: Path = OUT_DIR) -> tuple[int, i
                 f"{title}\n{ion}: первая группа, {len(packet)} каналов",
                 destination,
             )
+            print("plot", destination, flush=True)
+            saved += 1
+    print(f"saved {saved}, missing {missing}", flush=True)
+    return saved, missing
+
+
+def plot_top(top: int, folders: list[str], cache: Path = CACHE, out_dir: Path = OUT_DIR) -> tuple[int, int]:
+    """Первые top каналов каждого рейтинга на среднем спектре, по картинке на ион."""
+    import pandas as pd
+
+    if not cache.exists():
+        raise FileNotFoundError(f"нет кэша спектров: {cache}")
+    titles = dict(METHODS + PARTS_METHODS)
+    matrix = mean_train_matrix(np.load(cache)["X"])
+    saved = 0
+    missing = 0
+    for folder in folders:
+        title = titles.get(folder, folder)
+        for ion in TARGETS:
+            ranking_path = ROOT / "experiments" / folder / ion / "ranking.csv"
+            if not ranking_path.exists():
+                print("missing", ranking_path, flush=True)
+                missing += 1
+                continue
+            features = top_features(pd.read_csv(ranking_path), top)
+            destination = out_dir / folder / f"{ion}_top{top}.png"
+            save_selection_map(matrix, features, f"{title}\n{ion}: первые {len(features)} каналов", destination)
             print("plot", destination, flush=True)
             saved += 1
     print(f"saved {saved}, missing {missing}", flush=True)
@@ -140,8 +173,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--parts", type=int, help="раскрасить весь рейтинг по N частям списка")
     parser.add_argument("--data-order", action="store_true", help="части по номеру колонки в данных, а не по рейтингу")
+    parser.add_argument("--top", type=int, help="первые K каналов рейтинга вместо первой группы")
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        default=[folder for folder, _ in PARTS_METHODS],
+        help="папки рейтингов в experiments/ для --top",
+    )
     args = parser.parse_args()
-    if args.parts and args.data_order:
+    if args.top:
+        plot_top(args.top, args.methods)
+    elif args.parts and args.data_order:
         plot_data_order(args.parts)
     elif args.parts:
         plot_parts(args.parts)
