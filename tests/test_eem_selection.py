@@ -63,3 +63,27 @@ def test_method_list_covers_recent_spectroscopy_rankings():
         "6p_ridge_rfe_backward",
         "6p_ridge_rfe_forward",
     ]
+
+
+def test_rank_parts_split_list_into_equal_ordered_chunks():
+    from src.visualization.eem_selection import parts_matrix, rank_parts
+
+    features = [f"E280_em{375 + i}" for i in range(10)]
+    ranking = pd.DataFrame({"Feature": features[::-1], "Individual_Rank": range(1, 11)})
+    parts = rank_parts(ranking, 5)
+    assert [parts[f] for f in features[::-1]] == [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
+    matrix = parts_matrix(parts)
+    assert matrix[0, 9] == 1
+    assert matrix[0, 0] == 5
+    assert matrix[1, 0] == 0
+
+
+def test_save_parts_map_writes_png(tmp_path):
+    from src.visualization.eem_selection import save_parts_grid, save_parts_map
+
+    spectrum = np.linspace(0, 10, 27 * 201).reshape(27, 201)
+    parts = np.arange(27 * 201).reshape(27, 201) % 5 + 1
+    save_parts_map(spectrum, parts, "проверка", tmp_path / "map.png")
+    save_parts_grid(spectrum, [("a", parts), ("b", parts)], "проверка", tmp_path / "grid.png")
+    assert (tmp_path / "map.png").stat().st_size > 1000
+    assert (tmp_path / "grid.png").stat().st_size > 1000

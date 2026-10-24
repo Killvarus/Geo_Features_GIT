@@ -175,3 +175,103 @@ def save_selection_grid(
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)
+
+
+def rank_parts(ranking: pd.DataFrame, n_parts: int = 5) -> dict[str, int]:
+    """
+    Номер части списка для каждого канала: список по Individual_Rank делится
+    на n_parts почти равных кусков, 1 — начало списка (лучшие каналы).
+    """
+    if n_parts < 1:
+        raise ValueError("n_parts должен быть >= 1")
+    ordered = ranking.sort_values("Individual_Rank")["Feature"].astype(str).tolist()
+    total = len(ordered)
+    return {feature: position * n_parts // total + 1 for position, feature in enumerate(ordered)}
+
+
+def parts_matrix(parts: dict[str, int]) -> np.ndarray:
+    """Номера частей на сетке (возбуждение, испускание); каналы вне рейтинга — 0."""
+    matrix = np.zeros((N_EXC, N_EM), dtype=int)
+    for feature, part in parts.items():
+        excitation, emission = channel_coordinates(feature)
+        matrix[EXC_NM.index(excitation), EM_NM.index(emission)] = part
+    return matrix
+
+
+def _draw_parts(ax, spectrum: np.ndarray, parts: np.ndarray, n_parts: int):
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+
+    colors = plt.get_cmap("RdYlBu")(np.linspace(0.0, 1.0, n_parts))
+    cmap = ListedColormap(colors)
+    norm = BoundaryNorm(np.arange(0.5, n_parts + 1.5), cmap.N)
+    extent = (EM_NM[0] - 0.5, EM_NM[-1] + 0.5, EXC_NM[0] - 2.5, EXC_NM[-1] + 2.5)
+    image = ax.imshow(
+        np.ma.masked_equal(parts, 0), origin="lower", aspect="auto", cmap=cmap, norm=norm, extent=extent
+    )
+    # Изолинии среднего спектра — чтобы видеть, где пик и линии рассеяния.
+    _, vmax = color_limits(spectrum)
+    ax.contour(
+        EM_NM,
+        EXC_NM,
+        spectrum,
+        levels=vmax * np.array([0.1, 0.3, 0.6, 0.9]),
+        colors="black",
+        linewidths=0.6,
+        alpha=0.7,
+    )
+    return image
+
+
+def save_parts_map(
+    spectrum: np.ndarray,
+    parts: np.ndarray,
+    title: str,
+    path: str | Path,
+    n_parts: int = 5,
+) -> None:
+    """Карта: цвет канала — номер части списка, чёрные изолинии — средний спектр train."""
+    if spectrum.shape != (N_EXC, N_EM) or parts.shape != (N_EXC, N_EM):
+        raise ValueError(f"нужны матрицы {(N_EXC, N_EM)}")
+    fig, ax = plt.subplots(figsize=(8.2, 7.2))
+    image = _draw_parts(ax, spectrum, parts, n_parts)
+    colorbar = fig.colorbar(image, ax=ax, ticks=range(1, n_parts + 1), fraction=0.046, pad=0.04)
+    colorbar.set_label(f"Часть списка (1 — первые {100 // n_parts}%)")
+    ax.set_xlabel("Длина волны испускания, нм")
+    ax.set_ylabel("Длина волны возбуждения, нм")
+    ax.set_title(title)
+    fig.tight_layout()
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_parts_grid(
+    spectrum: np.ndarray,
+    panels: list[tuple[str, np.ndarray]],
+    title: str,
+    path: str | Path,
+    n_parts: int = 5,
+    ncols: int = 3,
+) -> None:
+    """То же для нескольких рейтингов на одной фигуре (например, шесть ионов)."""
+    if not panels:
+        raise ValueError("нет панелей")
+    nrows = math.ceil(len(panels) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.4 * ncols, 4.4 * nrows), squeeze=False)
+    image = None
+    for ax, (label, parts) in zip(axes.ravel(), panels):
+        image = _draw_parts(ax, spectrum, parts, n_parts)
+        ax.set_title(label, fontsize=11)
+        ax.set_xlabel("Испускание, нм", fontsize=8)
+        ax.set_ylabel("Возбуждение, нм", fontsize=8)
+        ax.tick_params(labelsize=7)
+    for ax in axes.ravel()[len(panels):]:
+        ax.axis("off")
+    colorbar = fig.colorbar(image, ax=axes.ravel().tolist(), ticks=range(1, n_parts + 1), fraction=0.02, pad=0.02)
+    colorbar.set_label(f"Часть списка (1 — первые {100 // n_parts}%)")
+    fig.suptitle(title, y=1.0)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
