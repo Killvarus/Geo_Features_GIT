@@ -255,3 +255,68 @@ def test_bad_switch_at_is_rejected():
     for bad in (-1, 1.5, True):
         with pytest.raises(ValueError):
             LinearRFE(alpha="loo_schedule", switch_at=bad)
+
+
+class _ChannelScaler:
+    """Нормировка по каналам как в scale_channels, в виде шага sklearn-конвейера."""
+
+    def __init__(self, method):
+        self.method = method
+
+    def fit(self, X, y=None):
+        from src.models.linear_selection import scale_channels
+
+        self.X_fit_ = np.asarray(X, dtype=float)
+        scale_channels(self.X_fit_, method=self.method)
+        return self
+
+    def transform(self, X):
+        from src.models.linear_selection import scale_channels
+
+        return scale_channels(self.X_fit_, np.asarray(X, dtype=float), method=self.method)[1]
+
+    def get_params(self, deep=True):
+        return {"method": self.method}
+
+    def set_params(self, **params):
+        self.method = params.get("method", self.method)
+        return self
+
+
+@pytest.mark.parametrize("scaling", ["pareto", "robust", "center"])
+def test_ppop_with_channel_scaling_matches_refitting(scaling):
+    X_train, y_train, X_valid, y_valid = _data()
+    p = X_train.shape[1]
+    selector = LinearPPOP(alpha=5.0, step=p, scaling=scaling).fit(X_train, y_train, X_valid, y_valid)
+
+    def mse(columns):
+        model = make_pipeline(_ChannelScaler(scaling), Ridge(alpha=5.0)).fit(X_train[columns], y_train)
+        return mean_squared_error(y_valid, model.predict(X_valid[columns]))
+
+    columns = list(X_train.columns)
+    full = mse(columns)
+    scores = selector.ranking_frame().set_index("Feature")["Score"]
+    for feature in columns:
+        expected = mse([c for c in columns if c != feature]) - full
+        assert scores[feature] == pytest.approx(expected, rel=1e-7, abs=1e-10)
+
+
+@pytest.mark.parametrize("scaling", ["pareto", "robust", "center"])
+def test_rfe_with_channel_scaling_matches_sklearn(scaling):
+    from src.models.linear_selection import scale_channels
+
+    X_train, y_train, _, _ = _data(n_train=50, p=15, seed=3)
+    ours = LinearRFE(alpha=4.0, step=1, scaling=scaling).fit(X_train, y_train)
+    (scaled,) = scale_channels(X_train.to_numpy(dtype=float), method=scaling)
+    reference = RFE(Ridge(alpha=4.0), n_features_to_select=1, step=1).fit(scaled, y_train)
+    frame = ours.ranking_frame()
+    assert dict(zip(frame["Feature"], frame["Individual_Rank"])) == dict(zip(X_train.columns, reference.ranking_))
+
+
+def test_scaling_changes_rfe_order_and_unknown_scaling_fails():
+    X_train, y_train, _, _ = _data(n_train=50, p=15, seed=3)
+    z = LinearRFE(alpha=4.0, step=1).fit(X_train, y_train).ranking_frame()["Feature"].tolist()
+    c = LinearRFE(alpha=4.0, step=1, scaling="center").fit(X_train, y_train).ranking_frame()["Feature"].tolist()
+    assert z != c
+    with pytest.raises(ValueError):
+        LinearRFE(scaling="minmax")

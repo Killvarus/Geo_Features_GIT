@@ -3,6 +3,7 @@
 
 Признаки стандартизуются по обучающей части, y центрируется. Так модель
 совпадает с Pipeline(StandardScaler(), Ridge(alpha)), а при alpha=0 — с LinearRegression.
+Вместо стандартизации можно взять другую нормировку по каналам (scaling, см. scale_channels).
 
 Пусть A = XᵀX + alpha·I на текущем наборе признаков и β = A⁻¹Xᵀy. Решение той же
 задачи без признака j: β₋ⱼ = β − A⁻¹[:, j]·βⱼ / A⁻¹[j, j]. Это точная формула, не
@@ -151,12 +152,44 @@ def _as_target(y, n_rows: int) -> np.ndarray:
     return target
 
 
+SCALINGS = ("zscore", "pareto", "robust", "center")
+
+
+def scale_channels(X_fit: np.ndarray, *others: np.ndarray, method: str = "zscore") -> list[np.ndarray]:
+    """
+    Нормировка по каналам: сдвиг и масштаб каждого столбца считаются по X_fit.
+      zscore — минус среднее, деление на std (ddof=0), как StandardScaler;
+      pareto — минус среднее, деление на корень из std;
+      robust — минус среднее, деление на межквартильный размах (сдвиг для Ridge
+               со свободным членом не важен, а быстрые формулы требуют
+               центрирования средним);
+      center — только минус среднее, масштаб исходный.
+    Нулевой масштаб заменяется на 1.
+    """
+    if method == "zscore":
+        shift, scale = X_fit.mean(axis=0), X_fit.std(axis=0)
+    elif method == "pareto":
+        shift, scale = X_fit.mean(axis=0), np.sqrt(X_fit.std(axis=0))
+    elif method == "robust":
+        q25, q75 = np.percentile(X_fit, [25, 75], axis=0)
+        shift, scale = X_fit.mean(axis=0), q75 - q25
+    elif method == "center":
+        shift, scale = X_fit.mean(axis=0), np.ones(X_fit.shape[1])
+    else:
+        raise ValueError(f"scaling должен быть одним из {SCALINGS}")
+    scale = np.where(scale == 0.0, 1.0, scale)
+    return [(X - shift) / scale for X in (X_fit, *others)]
+
+
 def _standardize(X_fit: np.ndarray, *others: np.ndarray) -> list[np.ndarray]:
     """Как StandardScaler: среднее и std (ddof=0) по X_fit, у константы масштаб 1."""
-    mean = X_fit.mean(axis=0)
-    std = X_fit.std(axis=0)
-    std[std == 0.0] = 1.0
-    return [(X - mean) / std for X in (X_fit, *others)]
+    return scale_channels(X_fit, *others, method="zscore")
+
+
+def _check_scaling(scaling: str) -> str:
+    if scaling not in SCALINGS:
+        raise ValueError(f"scaling должен быть одним из {SCALINGS}")
+    return scaling
 
 
 def _inverse(gram: np.ndarray, alpha: float, n_rows: int) -> np.ndarray:
@@ -226,10 +259,12 @@ class _SelectorBase:
 
 
 class _Split:
-    """Одна пара (обучение, оценка), стандартизованная по обучающей части."""
+    """Одна пара (обучение, оценка), масштабированная по обучающей части."""
 
-    def __init__(self, X_fit: np.ndarray, y_fit: np.ndarray, X_eval: np.ndarray, y_eval: np.ndarray):
-        X_fit, X_eval = _standardize(X_fit, X_eval)
+    def __init__(
+        self, X_fit: np.ndarray, y_fit: np.ndarray, X_eval: np.ndarray, y_eval: np.ndarray, scaling: str = "zscore"
+    ):
+        X_fit, X_eval = scale_channels(X_fit, X_eval, method=scaling)
         y_mean = y_fit.mean()
         self.n_fit = len(y_fit)
         self.n_eval = len(y_eval)
@@ -273,6 +308,7 @@ class LinearPPOP(_SelectorBase):
         random_state: int = 0,
         reshuffle: bool = False,
         switch_at: int = 500,
+        scaling: str = "zscore",
     ):
         check_step(step)
         if cv < 2:
@@ -284,16 +320,18 @@ class LinearPPOP(_SelectorBase):
         self.cv = int(cv)
         self.random_state = random_state
         self.reshuffle = bool(reshuffle)
+        self.scaling = _check_scaling(scaling)
         self.ranking_ = None
         self.history_ = None
         self.elapsed_seconds_ = None
 
     def _splits(self, X: np.ndarray, y: np.ndarray, X_eval, y_eval, seed=None) -> list[_Split]:
         if X_eval is not None:
-            return [_Split(X, y, np.asarray(X_eval, dtype=float), _as_target(y_eval, len(X_eval)))]
+            evaluation = np.asarray(X_eval, dtype=float)
+            return [_Split(X, y, evaluation, _as_target(y_eval, len(X_eval)), self.scaling)]
         seed = self.random_state if seed is None else seed
         folds = KFold(n_splits=self.cv, shuffle=True, random_state=seed)
-        return [_Split(X[fit], y[fit], X[held], y[held]) for fit, held in folds.split(X)]
+        return [_Split(X[fit], y[fit], X[held], y[held], self.scaling) for fit, held in folds.split(X)]
 
     def fit(self, X: pd.DataFrame, y, X_eval: pd.DataFrame | None = None, y_eval=None) -> "LinearPPOP":
         if (X_eval is None) != (y_eval is None):
@@ -308,7 +346,7 @@ class LinearPPOP(_SelectorBase):
         splits = None if reshuffle else self._splits(values, target, X_eval, y_eval)
         n_eval = len(target) if reshuffle else sum(split.n_eval for split in splits)
         if isinstance(self.alpha, str):
-            (scaled,) = _standardize(values)
+            (scaled,) = scale_channels(values, method=self.scaling)
             centered = target - target.mean()
 
         remaining = np.arange(len(names))
@@ -367,7 +405,7 @@ class LinearPPOP(_SelectorBase):
 
 class LinearRFE(_SelectorBase):
     """
-    RFE на МНК или Ridge. Важность — |β| после стандартизации train.
+    RFE на МНК или Ridge. Важность — |β| после масштабирования train (scaling).
 
     step=1 — классический RFE. Обратная матрица после выбрасывания обновляется
     формулой понижения ранга, раз в refresh_every выброшенных признаков
@@ -383,10 +421,12 @@ class LinearRFE(_SelectorBase):
         min_step: int = 1,
         refresh_every: int = 256,
         switch_at: int = 500,
+        scaling: str = "zscore",
     ):
         check_step(step)
         if refresh_every < 1:
             raise ValueError("refresh_every должен быть >= 1")
+        self.scaling = _check_scaling(scaling)
         self.alpha = _check_alpha(alpha)
         self.switch_at = _check_switch_at(switch_at)
         self.step = step
@@ -399,7 +439,7 @@ class LinearRFE(_SelectorBase):
     def fit(self, X: pd.DataFrame, y) -> "LinearRFE":
         names: list[Hashable] = list(X.columns)
         started = time.perf_counter()
-        (scaled,) = _standardize(X.to_numpy(dtype=float))
+        (scaled,) = scale_channels(X.to_numpy(dtype=float), method=self.scaling)
         target = _as_target(y, len(X))
         gram = scaled.T @ scaled
         xty = scaled.T @ (target - target.mean())
