@@ -5,7 +5,8 @@
   full_spectrum.csv/.png  — все 5427 каналов, по нормировке спектров и иону;
   heatmap_<valid|test>.png — средний по ионам R² персептрона, нормировка
                              спектров × каналов, для ППОП и RFE и каждого k;
-  curves_<ion>.png        — R² персептрона от k: нормировки спектров (каналы
+  curves_<ion>.png        — R² персептрона на validation от k (curves_test_<ion>.png —
+                             то же на test): нормировки спектров (каналы
                              z-score) и нормировки каналов (спектры raw);
   variants.csv            — все 48 вариантов, средние по ионам;
   best_by_ion.csv         — лучшие варианты для каждого иона;
@@ -125,7 +126,7 @@ def full_spectrum(table: pd.DataFrame) -> pd.DataFrame:
             )
         ax.set_xticks(range(len(TARGETS)), TARGETS)
         note = " ± std по 3 seed" if column.startswith("perceptron") else " (детерминирован)"
-        ax.set_title(f"{title}, все 5427 каналов, R² на test{note}")
+        ax.set_title(f"{title}, все 5427 каналов (z-score), R² на test{note}")
         ax.grid(True, axis="y", alpha=0.3)
     axes[0].set_ylabel("R²")
     axes[1].legend(fontsize=8, title="Нормировка спектров", loc="upper left", bbox_to_anchor=(1.01, 1.0))
@@ -188,7 +189,7 @@ def heatmaps(table: pd.DataFrame, split: str) -> None:
     plt.close(fig)
 
 
-def curves(table: pd.DataFrame, full: pd.DataFrame) -> None:
+def curves(table: pd.DataFrame, full: pd.DataFrame, split: str = "valid") -> None:
     perceptron = table[table["model"] == "perceptron"]
     colors = plt.get_cmap("tab10")
     for ion in TARGETS:
@@ -204,15 +205,15 @@ def curves(table: pd.DataFrame, full: pd.DataFrame) -> None:
                 ].sort_values("k")
                 ax.errorbar(
                     line["k"],
-                    line["r2_valid"],
-                    yerr=line["sd_valid"],
+                    line[f"r2_{split}"],
+                    yerr=line[f"sd_{split}"],
                     fmt="o-",
                     capsize=3,
                     color=colors(i),
                     label=SPECTRUM_LABEL[spectrum],
                 )
                 reference = full[(full["spectrum_norm"] == spectrum) & (full["ion"] == ion)].iloc[0]
-                level, spread = reference["perceptron_valid"], reference["perceptron_valid_sd"]
+                level, spread = reference[f"perceptron_{split}"], reference[f"perceptron_{split}_sd"]
                 ax.axhline(level, color=colors(i), ls=":", lw=1)
                 ax.axhspan(level - spread, level + spread, color=colors(i), alpha=0.08)
             ax.set_title(f"{METHOD_LABEL[method]}: нормировка спектров (каналы z-score)")
@@ -225,10 +226,10 @@ def curves(table: pd.DataFrame, full: pd.DataFrame) -> None:
                     & (perceptron["ion"] == ion)
                 ].sort_values("k")
                 ax.errorbar(
-                    line["k"], line["r2_valid"], yerr=line["sd_valid"], fmt="o-", capsize=3, color=colors(i), label=channel
+                    line["k"], line[f"r2_{split}"], yerr=line[f"sd_{split}"], fmt="o-", capsize=3, color=colors(i), label=channel
                 )
             reference = full[(full["spectrum_norm"] == "raw") & (full["ion"] == ion)].iloc[0]
-            level, spread = reference["perceptron_valid"], reference["perceptron_valid_sd"]
+            level, spread = reference[f"perceptron_{split}"], reference[f"perceptron_{split}_sd"]
             ax.axhline(level, color="black", ls=":", lw=1, label="все каналы")
             ax.axhspan(level - spread, level + spread, color="black", alpha=0.08)
             ax.set_title(f"{METHOD_LABEL[method]}: нормировка каналов (спектры без нормировки)")
@@ -238,15 +239,16 @@ def curves(table: pd.DataFrame, full: pd.DataFrame) -> None:
             ax.grid(True, alpha=0.3)
             ax.legend(fontsize=8)
         for ax in axes[:, 0]:
-            ax.set_ylabel("R² персептрона на validation")
+            ax.set_ylabel(f"R² персептрона на {split}")
         for ax in axes[1]:
             ax.set_xlabel("Число каналов k")
         fig.suptitle(
-            f"{ion}: персептрон на первых k каналах, ± std по 3 seed. "
+            f"{ion}: персептрон на первых k каналах, R² на {split}, ± std по 3 seed. "
             "Пунктир и полоса — все 5427 каналов той же нормировки спектров"
         )
         fig.tight_layout()
-        fig.savefig(OUT / f"curves_{ion}.png", dpi=120, bbox_inches="tight")
+        name = f"curves_{ion}.png" if split == "valid" else f"curves_{split}_{ion}.png"
+        fig.savefig(OUT / name, dpi=120, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -369,7 +371,8 @@ def main() -> None:
     variants(table)
     for split in ("valid", "test"):
         heatmaps(table, split)
-    curves(table, full)
+    curves(table, full, "valid")
+    curves(table, full, "test")
     best_by_ion(table)
     found = rankings()
     overlap(found)
