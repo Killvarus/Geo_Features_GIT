@@ -14,10 +14,17 @@
   stability.png           — как часто канал попадает в первые 100 по всем 48
                              вариантам (по иону на панель).
 Сравнение — по R² на validation, test для контроля.
+
+Погрешности — только от seed персептрона (3 запуска на точку):
+  у одного иона — стандартное отклонение по seed (ddof=1);
+  у среднего по ионам и/или k — стандартная ошибка среднего от seed:
+  √(Σσᵢ²/3) / N, где N — число усреднённых точек.
+Разброс от разбиения данных и от конечного размера выборок сюда не входит.
 """
 from __future__ import annotations
 
 import itertools
+import json
 import sys
 from pathlib import Path
 
@@ -53,14 +60,50 @@ METHOD_LABEL = {"ppop": "ППОП", "rfe": "RFE"}
 TOP = 100
 
 
+def seed_spread() -> pd.DataFrame:
+    """Стандартное отклонение R² персептрона по seed для каждой точки."""
+    rows = []
+    for path in GRID.glob("**/curve_points.json"):
+        relative = path.parent.relative_to(GRID).parts
+        if len(relative) == 3:
+            combo, method, ion = relative
+        else:
+            combo, ion = relative
+            method = "all_channels"
+        spectrum, channel = combo.split("__")
+        for point in json.loads(path.read_text(encoding="utf-8")):
+            rows.append(
+                {
+                    "spectrum_norm": spectrum,
+                    "channel_norm": channel,
+                    "method": method,
+                    "ion": ion,
+                    "k": point["k"],
+                    "model": "perceptron",
+                    "sd_valid": float(np.std([r["r2_valid"] for r in point["runs"]], ddof=1)),
+                    "sd_test": float(np.std([r["r2"] for r in point["runs"]], ddof=1)),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def load() -> pd.DataFrame:
-    return pd.read_csv(GRID / "summary.csv")
+    table = pd.read_csv(GRID / "summary.csv")
+    keys = ["spectrum_norm", "channel_norm", "method", "ion", "k", "model"]
+    return table.merge(seed_spread(), on=keys, how="left")
+
+
+def seed_error(sd: pd.Series) -> float:
+    """Стандартная ошибка среднего по точкам от seed: √(Σσ²/3) / N."""
+    return float(np.sqrt((sd**2 / 3).sum()) / len(sd))
 
 
 def full_spectrum(table: pd.DataFrame) -> pd.DataFrame:
     part = table[table["method"] == "all_channels"]
     wide = part.pivot_table(index=["spectrum_norm", "ion"], columns="model", values=["r2_valid", "r2_test"])
     wide.columns = [f"{model}_{split.split('_')[1]}" for split, model in wide.columns]
+    spread = part[part["model"] == "perceptron"].set_index(["spectrum_norm", "ion"])[["sd_valid", "sd_test"]]
+    wide = wide.join(spread.rename(columns={"sd_valid": "perceptron_valid_sd", "sd_test": "perceptron_test_sd"}))
     wide = wide.reset_index()
     wide.to_csv(OUT / "full_spectrum.csv", index=False)
 
@@ -68,12 +111,21 @@ def full_spectrum(table: pd.DataFrame) -> pd.DataFrame:
     width = 0.13
     for ax, column, title in zip(axes, ["perceptron_test", "ridge_test"], ["Персептрон", "Ridge alpha=700"]):
         for i, spectrum in enumerate(SPECTRA):
-            values = [
-                wide.loc[(wide["spectrum_norm"] == spectrum) & (wide["ion"] == ion), column].iloc[0] for ion in TARGETS
-            ]
-            ax.bar(np.arange(len(TARGETS)) + (i - 2.5) * width, values, width, label=SPECTRUM_LABEL[spectrum])
+            rows = [wide[(wide["spectrum_norm"] == spectrum) & (wide["ion"] == ion)].iloc[0] for ion in TARGETS]
+            values = [row[column] for row in rows]
+            errors = [row[f"{column}_sd"] for row in rows] if column.startswith("perceptron") else None
+            ax.bar(
+                np.arange(len(TARGETS)) + (i - 2.5) * width,
+                values,
+                width,
+                yerr=errors,
+                capsize=2,
+                error_kw={"lw": 0.8},
+                label=SPECTRUM_LABEL[spectrum],
+            )
         ax.set_xticks(range(len(TARGETS)), TARGETS)
-        ax.set_title(f"{title}, все 5427 каналов, R² на test")
+        note = " ± std по 3 seed" if column.startswith("perceptron") else " (детерминирован)"
+        ax.set_title(f"{title}, все 5427 каналов, R² на test{note}")
         ax.grid(True, axis="y", alpha=0.3)
     axes[0].set_ylabel("R²")
     axes[1].legend(fontsize=8, title="Нормировка спектров", loc="upper left", bbox_to_anchor=(1.01, 1.0))
@@ -85,11 +137,18 @@ def full_spectrum(table: pd.DataFrame) -> pd.DataFrame:
 
 def variants(table: pd.DataFrame) -> pd.DataFrame:
     part = table[(table["model"] == "perceptron") & (table["method"] != "all_channels")]
-    mean = part.groupby(["method", "spectrum_norm", "channel_norm", "k"])[["r2_valid", "r2_test"]].mean().reset_index()
-    wide = mean.pivot_table(index=["method", "spectrum_norm", "channel_norm"], columns="k", values=["r2_valid", "r2_test"])
+    keys = ["method", "spectrum_norm", "channel_norm"]
+    grouped = part.groupby(keys + ["k"])
+    mean = grouped[["r2_valid", "r2_test"]].mean()
+    mean["se_valid"] = grouped["sd_valid"].apply(seed_error)
+    mean["se_test"] = grouped["sd_test"].apply(seed_error)
+    wide = mean.reset_index().pivot_table(index=keys, columns="k", values=["r2_valid", "r2_test", "se_valid", "se_test"])
     wide.columns = [f"{split}_k{k}" for split, k in wide.columns]
-    wide["r2_valid_mean"] = wide[[f"r2_valid_k{k}" for k in KS]].mean(axis=1)
-    wide["r2_test_mean"] = wide[[f"r2_test_k{k}" for k in KS]].mean(axis=1)
+    overall = part.groupby(keys)
+    wide["r2_valid_mean"] = overall["r2_valid"].mean()
+    wide["r2_test_mean"] = overall["r2_test"].mean()
+    wide["se_valid_mean"] = overall["sd_valid"].apply(seed_error)
+    wide["se_test_mean"] = overall["sd_test"].apply(seed_error)
     wide = wide.sort_values("r2_valid_mean", ascending=False).reset_index()
     wide.to_csv(OUT / "variants.csv", index=False)
     return wide
@@ -97,7 +156,9 @@ def variants(table: pd.DataFrame) -> pd.DataFrame:
 
 def heatmaps(table: pd.DataFrame, split: str) -> None:
     part = table[(table["model"] == "perceptron") & (table["method"] != "all_channels")]
-    mean = part.groupby(["method", "spectrum_norm", "channel_norm", "k"])[f"r2_{split}"].mean()
+    grouped = part.groupby(["method", "spectrum_norm", "channel_norm", "k"])
+    mean = grouped[f"r2_{split}"].mean()
+    error = grouped[f"sd_{split}"].apply(seed_error)
     values = mean.to_numpy()
     vmin, vmax = np.nanmin(values), np.nanmax(values)
     fig, axes = plt.subplots(len(METHODS), len(KS), figsize=(4.0 * len(KS), 3.6 * len(METHODS)))
@@ -105,17 +166,20 @@ def heatmaps(table: pd.DataFrame, split: str) -> None:
         for col, k in enumerate(KS):
             ax = axes[row, col]
             grid = np.array([[mean[(method, s, c, k)] for c in CHANNELS] for s in SPECTRA])
+            errors = np.array([[error[(method, s, c, k)] for c in CHANNELS] for s in SPECTRA])
             low, high = grid.min(), grid.max()
             image = ax.imshow(grid, cmap="viridis", vmin=low, vmax=high, aspect="auto")
             for i, j in itertools.product(range(len(SPECTRA)), range(len(CHANNELS))):
                 color = "white" if grid[i, j] < low + 0.6 * (high - low) else "black"
-                ax.text(j, i, f"{grid[i, j]:.3f}", ha="center", va="center", fontsize=8, color=color)
+                label = f"{grid[i, j]:.3f}\n±{errors[i, j]:.3f}"
+                ax.text(j, i, label, ha="center", va="center", fontsize=7, color=color)
             ax.set_xticks(range(len(CHANNELS)), CHANNELS, fontsize=8)
             ax.set_yticks(range(len(SPECTRA)), [SPECTRUM_LABEL[s] for s in SPECTRA], fontsize=8)
             ax.set_title(f"{METHOD_LABEL[method]}, k = {k}", fontsize=10)
             fig.colorbar(image, ax=ax, fraction=0.046, pad=0.03)
     fig.suptitle(
-        f"Персептрон, средний по 6 ионам R² на {split}. Строки — нормировка спектров, столбцы — каналов "
+        f"Персептрон, средний по 6 ионам R² на {split} ± стандартная ошибка от seed. "
+        f"Строки — нормировка спектров, столбцы — каналов\n"
         f"(шкала у каждой панели своя; общий диапазон {vmin:.2f}–{vmax:.2f})",
         y=1.01,
     )
@@ -138,9 +202,19 @@ def curves(table: pd.DataFrame, full: pd.DataFrame) -> None:
                     & (perceptron["channel_norm"] == "zscore")
                     & (perceptron["ion"] == ion)
                 ].sort_values("k")
-                ax.plot(line["k"], line["r2_valid"], "o-", color=colors(i), label=SPECTRUM_LABEL[spectrum])
-                level = full.loc[(full["spectrum_norm"] == spectrum) & (full["ion"] == ion), "perceptron_valid"].iloc[0]
+                ax.errorbar(
+                    line["k"],
+                    line["r2_valid"],
+                    yerr=line["sd_valid"],
+                    fmt="o-",
+                    capsize=3,
+                    color=colors(i),
+                    label=SPECTRUM_LABEL[spectrum],
+                )
+                reference = full[(full["spectrum_norm"] == spectrum) & (full["ion"] == ion)].iloc[0]
+                level, spread = reference["perceptron_valid"], reference["perceptron_valid_sd"]
                 ax.axhline(level, color=colors(i), ls=":", lw=1)
+                ax.axhspan(level - spread, level + spread, color=colors(i), alpha=0.08)
             ax.set_title(f"{METHOD_LABEL[method]}: нормировка спектров (каналы z-score)")
             ax = axes[row, 1]
             for i, channel in enumerate(CHANNELS):
@@ -150,9 +224,13 @@ def curves(table: pd.DataFrame, full: pd.DataFrame) -> None:
                     & (perceptron["channel_norm"] == channel)
                     & (perceptron["ion"] == ion)
                 ].sort_values("k")
-                ax.plot(line["k"], line["r2_valid"], "o-", color=colors(i), label=channel)
-            level = full.loc[(full["spectrum_norm"] == "raw") & (full["ion"] == ion), "perceptron_valid"].iloc[0]
+                ax.errorbar(
+                    line["k"], line["r2_valid"], yerr=line["sd_valid"], fmt="o-", capsize=3, color=colors(i), label=channel
+                )
+            reference = full[(full["spectrum_norm"] == "raw") & (full["ion"] == ion)].iloc[0]
+            level, spread = reference["perceptron_valid"], reference["perceptron_valid_sd"]
             ax.axhline(level, color="black", ls=":", lw=1, label="все каналы")
+            ax.axhspan(level - spread, level + spread, color="black", alpha=0.08)
             ax.set_title(f"{METHOD_LABEL[method]}: нормировка каналов (спектры без нормировки)")
         for ax in axes.ravel():
             ax.set_xscale("log")
@@ -163,7 +241,10 @@ def curves(table: pd.DataFrame, full: pd.DataFrame) -> None:
             ax.set_ylabel("R² персептрона на validation")
         for ax in axes[1]:
             ax.set_xlabel("Число каналов k")
-        fig.suptitle(f"{ion}: персептрон на первых k каналах. Пунктир — все 5427 каналов той же нормировки спектров")
+        fig.suptitle(
+            f"{ion}: персептрон на первых k каналах, ± std по 3 seed. "
+            "Пунктир и полоса — все 5427 каналов той же нормировки спектров"
+        )
         fig.tight_layout()
         fig.savefig(OUT / f"curves_{ion}.png", dpi=120, bbox_inches="tight")
         plt.close(fig)
@@ -171,7 +252,11 @@ def curves(table: pd.DataFrame, full: pd.DataFrame) -> None:
 
 def best_by_ion(table: pd.DataFrame) -> pd.DataFrame:
     part = table[(table["model"] == "perceptron") & (table["method"] != "all_channels")]
-    mean = part.groupby(["ion", "method", "spectrum_norm", "channel_norm"])[["r2_valid", "r2_test"]].mean().reset_index()
+    grouped = part.groupby(["ion", "method", "spectrum_norm", "channel_norm"])
+    mean = grouped[["r2_valid", "r2_test"]].mean()
+    mean["se_valid"] = grouped["sd_valid"].apply(seed_error)
+    mean["se_test"] = grouped["sd_test"].apply(seed_error)
+    mean = mean.reset_index()
     rows = []
     for ion in TARGETS:
         ranked = mean[mean["ion"] == ion].sort_values("r2_valid", ascending=False).reset_index(drop=True)
