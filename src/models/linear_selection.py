@@ -166,19 +166,33 @@ def scale_channels(X_fit: np.ndarray, *others: np.ndarray, method: str = "zscore
       center — только минус среднее, масштаб исходный.
     Нулевой масштаб заменяется на 1.
     """
+    shift, scale = X_fit.mean(axis=0), _channel_scale(X_fit, method)
+    return [(X - shift) / scale for X in (X_fit, *others)]
+
+
+def scale_only(X_fit: np.ndarray, *others: np.ndarray, method: str = "zscore") -> list[np.ndarray]:
+    """
+    Только деление каждого канала на его масштаб по X_fit, без вычитания среднего
+    (масштабы те же, что в scale_channels). Нужна, когда после неё каналы
+    нормируются по спектрам: при центрировании сумма и максимум спектра теряют смысл.
+    """
+    scale = _channel_scale(X_fit, method)
+    return [X / scale for X in (X_fit, *others)]
+
+
+def _channel_scale(X_fit: np.ndarray, method: str) -> np.ndarray:
     if method == "zscore":
-        shift, scale = X_fit.mean(axis=0), X_fit.std(axis=0)
+        scale = X_fit.std(axis=0)
     elif method == "pareto":
-        shift, scale = X_fit.mean(axis=0), np.sqrt(X_fit.std(axis=0))
+        scale = np.sqrt(X_fit.std(axis=0))
     elif method == "robust":
         q25, q75 = np.percentile(X_fit, [25, 75], axis=0)
-        shift, scale = X_fit.mean(axis=0), q75 - q25
+        scale = q75 - q25
     elif method == "center":
-        shift, scale = X_fit.mean(axis=0), np.ones(X_fit.shape[1])
+        scale = np.ones(X_fit.shape[1])
     else:
         raise ValueError(f"scaling должен быть одним из {SCALINGS}")
-    scale = np.where(scale == 0.0, 1.0, scale)
-    return [(X - shift) / scale for X in (X_fit, *others)]
+    return np.where(scale == 0.0, 1.0, scale)
 
 
 def _standardize(X_fit: np.ndarray, *others: np.ndarray) -> list[np.ndarray]:

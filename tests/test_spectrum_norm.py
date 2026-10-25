@@ -79,3 +79,12 @@ def test_raw_is_a_copy_and_unknown_method_fails():
     assert set(SPECTRUM_NORMS) == {"raw", "max", "area", "snv", "raman", "row_max"}
     with pytest.raises(ValueError):
         normalize_spectra(X, "minmax", n_train=len(X))
+
+
+def test_non_positive_denominator_is_an_error():
+    X = _spectra()
+    X[3] = -np.abs(X[3])
+    with pytest.raises(ValueError, match="≤ 0"):
+        normalize_spectra(X, "area", n_train=len(X))
+    with pytest.raises(ValueError, match="≤ 0"):
+        normalize_spectra(X, "max", n_train=len(X))

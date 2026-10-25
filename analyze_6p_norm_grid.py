@@ -63,22 +63,15 @@ TOP = 100
 
 def seed_spread() -> pd.DataFrame:
     """Стандартное отклонение R² персептрона по seed для каждой точки."""
+    from run_6p_norm_grid import describe
+
     rows = []
     for path in GRID.glob("**/curve_points.json"):
-        relative = path.parent.relative_to(GRID).parts
-        if len(relative) == 3:
-            combo, method, ion = relative
-        else:
-            combo, ion = relative
-            method = "all_channels"
-        spectrum, channel = combo.split("__")
+        variant = describe(path.parent.relative_to(GRID).parts)
         for point in json.loads(path.read_text(encoding="utf-8")):
             rows.append(
                 {
-                    "spectrum_norm": spectrum,
-                    "channel_norm": channel,
-                    "method": method,
-                    "ion": ion,
+                    **variant,
                     "k": point["k"],
                     "model": "perceptron",
                     "sd_valid": float(np.std([r["r2_valid"] for r in point["runs"]], ddof=1)),
@@ -89,9 +82,13 @@ def seed_spread() -> pd.DataFrame:
 
 
 def load() -> pd.DataFrame:
+    """Сводка с разбросом по seed. Здесь — только прямой порядок (сначала спектры, потом каналы)."""
     table = pd.read_csv(GRID / "summary.csv")
-    keys = ["spectrum_norm", "channel_norm", "method", "ion", "k", "model"]
-    return table.merge(seed_spread(), on=keys, how="left")
+    if "order" not in table.columns:
+        table["order"] = "spectrum_first"
+    keys = ["order", "spectrum_norm", "channel_norm", "method", "ion", "k", "model"]
+    table = table.merge(seed_spread(), on=keys, how="left")
+    return table[table["order"] == "spectrum_first"].drop(columns="order")
 
 
 def seed_error(sd: pd.Series) -> float:
@@ -277,6 +274,8 @@ def rankings() -> dict[tuple[str, str, str, str], list[str]]:
     found = {}
     for path in GRID.glob("*__*/*/*/ranking.csv"):
         combo, method, ion = path.parts[-4], path.parts[-3], path.parts[-2]
+        if combo.count("__") != 1:
+            continue  # обратный порядок (…__chfirst) здесь не рисуется
         spectrum, channel = combo.split("__")
         found[(method, spectrum, channel, ion)] = top_features(pd.read_csv(path), TOP)
     return found

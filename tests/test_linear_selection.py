@@ -320,3 +320,16 @@ def test_scaling_changes_rfe_order_and_unknown_scaling_fails():
     assert z != c
     with pytest.raises(ValueError):
         LinearRFE(scaling="minmax")
+
+
+def test_scale_only_divides_by_the_same_scale_without_centering():
+    from src.models.linear_selection import scale_channels, scale_only
+
+    X_train, _, X_valid, _ = _data()
+    train, valid = X_train.to_numpy(), X_valid.to_numpy()
+    for method in ("zscore", "pareto", "robust"):
+        only_train, only_valid = scale_only(train, valid, method=method)
+        full_train, full_valid = scale_channels(train, valid, method=method)
+        shift = train.mean(axis=0) / (train / only_train)[0]
+        np.testing.assert_allclose(only_train - shift, full_train, atol=1e-9)
+        np.testing.assert_allclose(only_valid - shift, full_valid, atol=1e-9)

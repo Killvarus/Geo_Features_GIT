@@ -48,6 +48,14 @@ def raman_height(X: np.ndarray) -> np.ndarray:
     return band(382, 386) - (band(375, 377) + band(391, 393)) / 2.0
 
 
+def _positive(denominator: np.ndarray, what: str) -> np.ndarray:
+    """Делить можно только на положительное: иначе спектр меняет знак или улетает в бесконечность."""
+    bad = int((denominator <= 0).sum())
+    if bad:
+        raise ValueError(f"{what} спектра ≤ 0 у {bad} строк, нормировка не определена")
+    return denominator
+
+
 def normalize_spectra(X: np.ndarray, method: str, n_train: int) -> np.ndarray:
     """
     X — (строки, 5427). n_train — первые строки train: по ним считается только
@@ -60,9 +68,9 @@ def normalize_spectra(X: np.ndarray, method: str, n_train: int) -> np.ndarray:
     if method == "raw":
         return X.copy()
     if method == "max":
-        return X / X[:, mask].max(axis=1, keepdims=True)
+        return X / _positive(X[:, mask].max(axis=1, keepdims=True), "максимум")
     if method == "area":
-        return X / X[:, mask].sum(axis=1, keepdims=True)
+        return X / _positive(X[:, mask].sum(axis=1, keepdims=True), "площадь")
     if method == "snv":
         inside = X[:, mask]
         return (X - inside.mean(axis=1, keepdims=True)) / inside.std(axis=1, keepdims=True)
@@ -75,5 +83,5 @@ def normalize_spectra(X: np.ndarray, method: str, n_train: int) -> np.ndarray:
     if method == "row_max":
         cube = X.reshape(len(X), N_EXC, N_EM)
         inside = np.where(mask.reshape(N_EXC, N_EM)[None], np.abs(cube), 0.0)
-        return (cube / inside.max(axis=2, keepdims=True)).reshape(len(X), -1)
+        return (cube / _positive(inside.max(axis=2, keepdims=True), "максимум строки")).reshape(len(X), -1)
     raise ValueError(f"нормировка по спектру должна быть одной из {SPECTRUM_NORMS}")
