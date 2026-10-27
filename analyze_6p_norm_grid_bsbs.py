@@ -198,7 +198,8 @@ def curves(table: pd.DataFrame, model: str) -> None:
                 line["k"], line[split], yerr=errors, fmt="o-", capsize=3, color=colors(i), label=SPECTRUM_LABEL[spectrum]
             )
         ax.set_xscale("log")
-        ax.set_xticks(KS, [k_label(k) for k in KS])
+        ax.set_xticks(KS, [k_label(k) for k in KS], rotation=45, ha="right")
+        ax.minorticks_off()
         ax.set_xlabel("Число каналов k (первые k рейтинга BSBS; «все 5427» — без отбора)")
         ax.set_ylabel(f"R² на {split}")
         ax.grid(True, alpha=0.3)
