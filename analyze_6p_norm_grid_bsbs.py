@@ -16,7 +16,9 @@ Ridge (alpha=700, z-score каналов) считается здесь для �
 
 Всё пишется в experiments/6p_norm_grid/analysis/:
   bsbs_heatmaps/<perceptron|ridge>/<r2|mse|mae>/<ион>_test.png
-  bsbs_curves/<perceptron|ridge>/<r2|mse|mae>/<ион>_<test|valid>.png
+  bsbs_curves/<perceptron|ridge>/<r2|mse|mae>/<ион>_<test|valid>.png — линии: нормировки спектров
+  bsbs_curves_by_channel/<perceptron|ridge>/<r2|mse|mae>/<спектр>/<ион>_<test|valid>.png
+      — для одной нормировки спектров, линии: нормировки каналов
   bsbs_maps/<ион>/<спектр>__<каналы>/importance.png и top<k>.png
   bsbs_ridge_metrics.csv — кеш Ridge.
 """
@@ -235,9 +237,8 @@ def heatmaps(table: pd.DataFrame, model: str, metric: str) -> None:
                 ax.text(j, i, label, ha="center", va="center", fontsize=7, color=color)
             fig.colorbar(image, ax=ax, fraction=0.046, pad=0.03)
         note = "± std по 3 seed" if model == "perceptron" else "без случайности"
-        better = "меньше — лучше" if LOWER_IS_BETTER[metric] else "больше — лучше"
         fig.suptitle(
-            f"{ion}: BSBS, {MODEL_TITLE[model]} на первых k каналах, {METRIC_LABEL[metric]} на test ({note}; {better})",
+            f"{ion}: BSBS, {MODEL_TITLE[model]} на первых k каналах, {METRIC_LABEL[metric]} на test ({note})",
             y=1.0,
         )
         fig.tight_layout()
@@ -268,14 +269,49 @@ def curves(table: pd.DataFrame, model: str, metric: str) -> None:
         ax.set_xticks(KS, [k_label(k) for k in KS], rotation=45, ha="right")
         ax.minorticks_off()
         ax.set_xlabel("Число каналов k (первые k рейтинга BSBS; «все 5427» — без отбора)")
-        better = "меньше — лучше" if LOWER_IS_BETTER[metric] else "больше — лучше"
-        ax.set_ylabel(f"{METRIC_LABEL[metric]} на {split} ({better})")
+        ax.set_ylabel(f"{METRIC_LABEL[metric]} на {split}")
         ax.grid(True, alpha=0.3)
         ax.legend(title="Нормировка спектров", fontsize=8)
         missing = sorted(set(KS) - set(part["k"]))
         note = f"; нет данных для k = {', '.join(map(str, missing))}" if missing else ""
         spread = ", ± std по 3 seed" if model == "perceptron" else ""
         ax.set_title(f"{ion}: BSBS, {MODEL_TITLE[model]}{spread}{note}", fontsize=10)
+        fig.tight_layout()
+        fig.savefig(folder / f"{ion}_{split}.png", dpi=120, bbox_inches="tight")
+        plt.close(fig)
+
+
+def channel_curves(table: pd.DataFrame, model: str, metric: str) -> None:
+    """Для каждой нормировки спектров: линии — нормировки каналов внутри отбора."""
+    colors = plt.get_cmap("tab10")
+    for spectrum, ion, split in itertools.product(SPECTRA, TARGETS, ("test", "valid")):
+        column = f"{metric}_{split}"
+        if column not in table.columns:
+            continue
+        part = table[(table["ion"] == ion) & (table["spectrum"] == spectrum)].dropna(subset=[column])
+        if part.empty:
+            continue
+        folder = OUT / "bsbs_curves_by_channel" / model / metric / spectrum
+        folder.mkdir(parents=True, exist_ok=True)
+        fig, ax = plt.subplots(figsize=(9, 5.8))
+        for i, channel in enumerate(CHANNELS):
+            line = part[part["channel"] == channel].sort_values("k")
+            line = line[line["k"].isin(KS)]
+            if line.empty:
+                continue
+            errors = line[f"{column}_sd"] if f"{column}_sd" in line.columns else None
+            ax.errorbar(line["k"], line[column], yerr=errors, fmt="o-", capsize=3, color=colors(i), label=channel)
+        ax.set_xscale("log")
+        ax.set_xticks(KS, [k_label(k) for k in KS], rotation=45, ha="right")
+        ax.minorticks_off()
+        ax.set_xlabel("Число каналов k (первые k рейтинга BSBS; «все 5427» — без отбора)")
+        ax.set_ylabel(f"{METRIC_LABEL[metric]} на {split}")
+        ax.grid(True, alpha=0.3)
+        ax.legend(title="Нормировка каналов", fontsize=8)
+        missing = sorted(set(KS) - set(part["k"]))
+        note = f"; нет данных для k = {', '.join(map(str, missing))}" if missing else ""
+        spread = ", ± std по 3 seed" if model == "perceptron" else ""
+        ax.set_title(f"{ion}: BSBS, {MODEL_TITLE[model]}{spread}, спектры {SPECTRUM_LABEL[spectrum]}{note}", fontsize=10)
         fig.tight_layout()
         fig.savefig(folder / f"{ion}_{split}.png", dpi=120, bbox_inches="tight")
         plt.close(fig)
@@ -331,6 +367,7 @@ def main() -> None:
     for (model, table), metric in itertools.product(tables.items(), METRICS):
         heatmaps(table, model, metric)
         curves(table, model, metric)
+        channel_curves(table, model, metric)
         print("plots", model, metric, flush=True)
     if not args.skip_maps:
         maps()
