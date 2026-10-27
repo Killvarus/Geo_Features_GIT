@@ -171,8 +171,12 @@ def run_rank(
         ranking = selector.ranking_frame()
         print(ion, spectrum, channel, method, "ranking done, seconds", round(selector.elapsed_seconds_, 1), flush=True)
     ordered = ranking.sort_values("Individual_Rank")["Feature"].astype(str).tolist()
-    checks = {str(k): linear_check(X, y, ordered[:k]) for k in ks}
-    (ion_dir / "linear_check.json").write_text(json.dumps(checks, indent=2), encoding="utf-8")
+    # Дописываем к уже посчитанным k, а не затираем их.
+    check_path = ion_dir / "linear_check.json"
+    checks = json.loads(check_path.read_text(encoding="utf-8")) if check_path.exists() else {}
+    checks.update({str(k): linear_check(X, y, ordered[:k]) for k in ks})
+    ordered_checks = dict(sorted(checks.items(), key=lambda item: int(item[0])))
+    check_path.write_text(json.dumps(ordered_checks, indent=2), encoding="utf-8")
     if perceptron:
         train_curve(directory, ion, X, y, ranking, ks)
 
