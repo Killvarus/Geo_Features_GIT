@@ -15,9 +15,9 @@ Ridge (alpha=700, z-score каналов) считается здесь для �
 Недостающие точки помечены «нет данных».
 
 Всё пишется в experiments/6p_norm_grid/analysis/:
-  bsbs_heatmaps/<perceptron|ridge>/<r2|mse|mae>/<ион>_test.png
-  bsbs_curves/<perceptron|ridge>/<r2|mse|mae>/<ион>_<test|valid>.png — линии: нормировки спектров
-  bsbs_curves_by_channel/<perceptron|ridge>/<r2|mse|mae>/<спектр>/<ион>_<test|valid>.png
+  bsbs_heatmaps/<perceptron|ridge>/<r2|mse|mae>/<test|valid>/<ион>.png
+  bsbs_curves/<perceptron|ridge>/<r2|mse|mae>/<test|valid>/<ион>.png — линии: нормировки спектров
+  bsbs_curves_by_channel/<perceptron|ridge>/<r2|mse|mae>/<test|valid>/<спектр>/<ион>.png
       — для одной нормировки спектров, линии: нормировки каналов
   bsbs_maps/<ион>/<спектр>__<каналы>/importance.png и top<k>.png
   bsbs_ridge_metrics.csv — кеш Ridge.
@@ -192,12 +192,12 @@ def _number(value: float, metric: str) -> str:
     return f"{value:.3f}" if metric == "r2" or abs(value) < 100 else f"{value:.1f}"
 
 
-def heatmaps(table: pd.DataFrame, model: str, metric: str) -> None:
-    column = f"{metric}_test"
+def heatmaps(table: pd.DataFrame, model: str, metric: str, split: str) -> None:
+    column = f"{metric}_{split}"
     if column not in table.columns:
         print("skip heatmaps", model, metric, "— нет данных", flush=True)
         return
-    folder = OUT / "bsbs_heatmaps" / model / metric
+    folder = OUT / "bsbs_heatmaps" / model / metric / split
     folder.mkdir(parents=True, exist_ok=True)
     cmap = "viridis_r" if LOWER_IS_BETTER[metric] else "viridis"
     for ion in TARGETS:
@@ -238,21 +238,21 @@ def heatmaps(table: pd.DataFrame, model: str, metric: str) -> None:
             fig.colorbar(image, ax=ax, fraction=0.046, pad=0.03)
         note = "± std по 3 seed" if model == "perceptron" else "без случайности"
         fig.suptitle(
-            f"{ion}: BSBS, {MODEL_TITLE[model]} на первых k каналах, {METRIC_LABEL[metric]} на test ({note})",
+            f"{ion}: BSBS, {MODEL_TITLE[model]} на первых k каналах, {METRIC_LABEL[metric]} на {split} ({note})",
             y=1.0,
         )
         fig.tight_layout()
-        fig.savefig(folder / f"{ion}_test.png", dpi=120, bbox_inches="tight")
+        fig.savefig(folder / f"{ion}.png", dpi=120, bbox_inches="tight")
         plt.close(fig)
 
 
 def curves(table: pd.DataFrame, model: str, metric: str) -> None:
-    folder = OUT / "bsbs_curves" / model / metric
     colors = plt.get_cmap("tab10")
     for ion, split in itertools.product(TARGETS, ("test", "valid")):
         column = f"{metric}_{split}"
         if column not in table.columns:
             continue
+        folder = OUT / "bsbs_curves" / model / metric / split
         folder.mkdir(parents=True, exist_ok=True)
         part = table[(table["ion"] == ion) & (table["channel"] == "zscore")].dropna(subset=[column])
         fig, ax = plt.subplots(figsize=(9, 5.8))
@@ -277,7 +277,7 @@ def curves(table: pd.DataFrame, model: str, metric: str) -> None:
         spread = ", ± std по 3 seed" if model == "perceptron" else ""
         ax.set_title(f"{ion}: BSBS, {MODEL_TITLE[model]}{spread}{note}", fontsize=10)
         fig.tight_layout()
-        fig.savefig(folder / f"{ion}_{split}.png", dpi=120, bbox_inches="tight")
+        fig.savefig(folder / f"{ion}.png", dpi=120, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -291,7 +291,7 @@ def channel_curves(table: pd.DataFrame, model: str, metric: str) -> None:
         part = table[(table["ion"] == ion) & (table["spectrum"] == spectrum)].dropna(subset=[column])
         if part.empty:
             continue
-        folder = OUT / "bsbs_curves_by_channel" / model / metric / spectrum
+        folder = OUT / "bsbs_curves_by_channel" / model / metric / split / spectrum
         folder.mkdir(parents=True, exist_ok=True)
         fig, ax = plt.subplots(figsize=(9, 5.8))
         for i, channel in enumerate(CHANNELS):
@@ -313,7 +313,7 @@ def channel_curves(table: pd.DataFrame, model: str, metric: str) -> None:
         spread = ", ± std по 3 seed" if model == "perceptron" else ""
         ax.set_title(f"{ion}: BSBS, {MODEL_TITLE[model]}{spread}, спектры {SPECTRUM_LABEL[spectrum]}{note}", fontsize=10)
         fig.tight_layout()
-        fig.savefig(folder / f"{ion}_{split}.png", dpi=120, bbox_inches="tight")
+        fig.savefig(folder / f"{ion}.png", dpi=120, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -365,7 +365,8 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     tables = {"perceptron": perceptron_points(), "ridge": ridge_points()}
     for (model, table), metric in itertools.product(tables.items(), METRICS):
-        heatmaps(table, model, metric)
+        for split in ("test", "valid"):
+            heatmaps(table, model, metric, split)
         curves(table, model, metric)
         channel_curves(table, model, metric)
         print("plots", model, metric, flush=True)
