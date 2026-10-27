@@ -81,6 +81,7 @@ def save_selection_map(
     features: list[str],
     title: str,
     path: str | Path,
+    legend: bool = True,
 ) -> list[tuple[int, int]]:
     """Тепловая карта среднего спектра и белые маркеры отобранных каналов."""
     if matrix.shape != (N_EXC, N_EM):
@@ -116,7 +117,7 @@ def save_selection_map(
     ax.set_xlabel("Длина волны испускания, нм")
     ax.set_ylabel("Длина волны возбуждения, нм")
     ax.set_title(title)
-    if coords:
+    if coords and legend:
         ax.legend(loc="upper right", framealpha=0.9)
     fig.tight_layout()
     path = Path(path)

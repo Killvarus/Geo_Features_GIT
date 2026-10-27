@@ -1,19 +1,20 @@
 """
-Графики сетки нормировок 6P только для ППОП (прямой порядок: спектры, потом каналы).
+Графики сетки нормировок 6P только для BSBS (в коде и папках результатов он
+называется ppop; прямой порядок: спектры, потом каналы).
 
-k: 10, 50, 100, 250, 500, 1000, 1500 и полный набор (5427 каналов).
+k: 10, 50, 100, 250, 500, 1000, 1500, 2000, 3000, 4000 и полный набор (5427 каналов).
 Персептрон берётся из curve_points.json — есть не для всех k: недостающие точки
 помечены «нет данных» и появятся после дорасчёта на сервере. Ridge (alpha=700,
 z-score каналов) считается здесь же для всех k и кешируется.
 
 Всё пишется в experiments/6p_norm_grid/analysis/:
-  ppop_heatmaps/<perceptron|ridge>/<ион>_test.png
+  bsbs_heatmaps/<perceptron|ridge>/<ион>_test.png
       R² на test: строки — нормировка спектров, столбцы — каналов, панель — k.
-  ppop_curves/<perceptron|ridge>/<ион>_<test|valid>.png
-      R² от k, линии — нормировки спектров (каналы z-score).
-  ppop_maps/<ион>/<спектр>__<каналы>/importance.png — все каналы, цвет — место в рейтинге;
+  bsbs_curves/<perceptron|ridge>/<ион>_<test|valid>.png
+      R² от k, линии — нормировки спектров (внутри отбора каналы z-score).
+  bsbs_maps/<ион>/<спектр>__<каналы>/importance.png — все каналы, цвет — место в рейтинге;
                                   top<k>.png       — первые k каналов (k до 1000).
-  ppop_ridge_topk.csv — кеш Ridge по всем k.
+  bsbs_ridge_topk.csv — кеш Ridge по всем k.
 """
 from __future__ import annotations
 
@@ -52,7 +53,7 @@ TARGETS = ["Cu", "Ni", "Al", "Co", "Cr", "NO3"]
 SPECTRA = ["raw", "max", "area", "snv", "raman", "row_max"]
 CHANNELS = ["zscore", "pareto", "robust", "center"]
 FULL = 5427
-KS = [10, 50, 100, 250, 500, 1000, 1500, FULL]
+KS = [10, 50, 100, 250, 500, 1000, 1500, 2000, 3000, 4000, FULL]
 MAP_KS = [10, 50, 100, 250, 500, 1000]
 SPECTRUM_LABEL = {
     "raw": "без нормировки",
@@ -62,7 +63,6 @@ SPECTRUM_LABEL = {
     "raman": "на пик воды",
     "row_max": "по строкам",
 }
-CHANNEL_LABEL = {"zscore": "zscore", "pareto": "pareto", "robust": "robust", "center": "center (без масштаба)"}
 MODEL_TITLE = {"perceptron": "персептрон", "ridge": "Ridge alpha=700"}
 
 
@@ -71,7 +71,7 @@ def k_label(k: int) -> str:
 
 
 def perceptron_points() -> pd.DataFrame:
-    """R² персептрона и разброс по seed для ППОП и для всех каналов."""
+    """R² персептрона и разброс по seed для BSBS и для всех каналов."""
     rows = []
     for spectrum, channel, ion in itertools.product(SPECTRA, CHANNELS, TARGETS):
         path = GRID / f"{spectrum}__{channel}" / "ppop" / ion / "curve_points.json"
@@ -108,8 +108,8 @@ def ranking(spectrum: str, channel: str, ion: str) -> pd.DataFrame:
 
 
 def ridge_points() -> pd.DataFrame:
-    """Ridge alpha=700 на первых k каналах рейтинга ППОП (как linear_check), с кешем."""
-    path = OUT / "ppop_ridge_topk.csv"
+    """Ridge alpha=700 на первых k каналах рейтинга BSBS (как linear_check), с кешем."""
+    path = OUT / "bsbs_ridge_topk.csv"
     done = pd.read_csv(path) if path.exists() else pd.DataFrame(columns=["spectrum", "channel", "ion", "k"])
     have = set(zip(done["spectrum"], done["channel"], done["ion"], done["k"].astype(int)))
     rows = []
@@ -136,11 +136,14 @@ def ridge_points() -> pd.DataFrame:
 
 
 def heatmaps(table: pd.DataFrame, model: str) -> None:
-    folder = OUT / "ppop_heatmaps" / model
+    folder = OUT / "bsbs_heatmaps" / model
     folder.mkdir(parents=True, exist_ok=True)
     for ion in TARGETS:
         part = table[table["ion"] == ion].set_index(["spectrum", "channel", "k"])
-        fig, axes = plt.subplots(2, 4, figsize=(17, 8.6))
+        nrows = -(-len(KS) // 4)
+        fig, axes = plt.subplots(nrows, 4, figsize=(17, 4.3 * nrows))
+        for ax in axes.ravel()[len(KS):]:
+            ax.axis("off")
         for ax, k in zip(axes.ravel(), KS):
             grid = np.full((len(SPECTRA), len(CHANNELS)), np.nan)
             spread = np.full_like(grid, np.nan)
@@ -170,8 +173,7 @@ def heatmaps(table: pd.DataFrame, model: str) -> None:
             fig.colorbar(image, ax=ax, fraction=0.046, pad=0.03)
         note = "± std по 3 seed" if model == "perceptron" else "без случайности"
         fig.suptitle(
-            f"{ion}: ППОП, {MODEL_TITLE[model]} на первых k каналах, R² на test ({note}).\n"
-            "Строки — нормировка спектров, столбцы — нормировка каналов внутри отбора; шкала у каждой панели своя",
+            f"{ion}: BSBS, {MODEL_TITLE[model]} на первых k каналах, R² на test ({note})",
             y=1.0,
         )
         fig.tight_layout()
@@ -180,7 +182,7 @@ def heatmaps(table: pd.DataFrame, model: str) -> None:
 
 
 def curves(table: pd.DataFrame, model: str) -> None:
-    folder = OUT / "ppop_curves" / model
+    folder = OUT / "bsbs_curves" / model
     folder.mkdir(parents=True, exist_ok=True)
     colors = plt.get_cmap("tab10")
     for ion, split in itertools.product(TARGETS, ("test", "valid")):
@@ -197,14 +199,14 @@ def curves(table: pd.DataFrame, model: str) -> None:
             )
         ax.set_xscale("log")
         ax.set_xticks(KS, [k_label(k) for k in KS])
-        ax.set_xlabel("Число каналов k (первые k рейтинга ППОП; «все 5427» — без отбора)")
+        ax.set_xlabel("Число каналов k (первые k рейтинга BSBS; «все 5427» — без отбора)")
         ax.set_ylabel(f"R² на {split}")
         ax.grid(True, alpha=0.3)
         ax.legend(title="Нормировка спектров", fontsize=8)
         missing = sorted(set(KS) - set(part["k"]))
         note = f"; нет данных для k = {', '.join(map(str, missing))}" if missing else ""
         spread = ", ± std по 3 seed" if model == "perceptron" else ""
-        ax.set_title(f"{ion}: ППОП, {MODEL_TITLE[model]}{spread}, каналы z-score{note}", fontsize=10)
+        ax.set_title(f"{ion}: BSBS, {MODEL_TITLE[model]}{spread}{note}", fontsize=10)
         fig.tight_layout()
         fig.savefig(folder / f"{ion}_{split}.png", dpi=120, bbox_inches="tight")
         plt.close(fig)
@@ -226,10 +228,10 @@ def importance_map(spectrum_mean: np.ndarray, frame: pd.DataFrame, title: str, p
     colorbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
     colorbar.set_ticks([1, 10, 100, 1000, int(places.max())])
     colorbar.set_ticklabels(["1", "10", "100", "1000", str(int(places.max()))])
-    colorbar.set_label("Место в рейтинге ППОП (1 — самый важный, лог. шкала)")
+    colorbar.set_label("Место в рейтинге BSBS (1 — лучший, лог. шкала)")
     ax.set_xlabel("Длина волны испускания, нм")
     ax.set_ylabel("Длина волны возбуждения, нм")
-    ax.set_title(title + "\nголубые линии — средний спектр train (10, 30, 60, 90% от максимума)", fontsize=10)
+    ax.set_title(title, fontsize=10)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=130, bbox_inches="tight")
@@ -240,12 +242,14 @@ def maps() -> None:
     spectrum_mean = mean_train_matrix(np.load(CACHE)["X"])
     for ion in TARGETS:
         for spectrum, channel in itertools.product(SPECTRA, CHANNELS):
-            folder = OUT / "ppop_maps" / ion / f"{spectrum}__{channel}"
+            folder = OUT / "bsbs_maps" / ion / f"{spectrum}__{channel}"
             frame = ranking(spectrum, channel, ion)
-            name = f"ППОП, {ion}: спектры {SPECTRUM_LABEL[spectrum]}, каналы {CHANNEL_LABEL[channel]}"
-            importance_map(spectrum_mean, frame, name + ", важность всех каналов", folder / "importance.png")
+            name = f"BSBS, {ion}: нормировка спектров {SPECTRUM_LABEL[spectrum]}"
+            importance_map(spectrum_mean, frame, name, folder / "importance.png")
             for k in MAP_KS:
-                save_selection_map(spectrum_mean, top_features(frame, k), f"{name}\nпервые {k} каналов", folder / f"top{k}.png")
+                save_selection_map(
+                    spectrum_mean, top_features(frame, k), f"{name}\nпервые {k} каналов", folder / f"top{k}.png", legend=False
+                )
         print("maps", ion, flush=True)
 
 
