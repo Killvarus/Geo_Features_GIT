@@ -3,18 +3,22 @@
 называется ppop; прямой порядок: спектры, потом каналы).
 
 k: 10, 50, 100, 250, 500, 1000, 1500, 2000, 3000, 4000 и полный набор (5427 каналов).
-Персептрон берётся из curve_points.json — есть не для всех k: недостающие точки
-помечены «нет данных» и появятся после дорасчёта на сервере. Ridge (alpha=700,
-z-score каналов) считается здесь же для всех k и кешируется.
+Метрики: R², MSE, MAE.
+
+Персептрон:
+  R² — из curve_points.json (test и validation);
+  MSE на test — (1 − R²)·дисперсия y на test, это точно то же, что считал персептрон;
+  MSE на validation — лучшая ошибка на validation из истории обучения, в исходных единицах;
+  MAE на test — только из metrics.xlsx в папках k<k>/ (их нужно скачать с сервера);
+  MAE на validation при обучении не сохранялся — этих графиков нет.
+Ridge (alpha=700, z-score каналов) считается здесь для всех метрик и кешируется.
+Недостающие точки помечены «нет данных».
 
 Всё пишется в experiments/6p_norm_grid/analysis/:
-  bsbs_heatmaps/<perceptron|ridge>/<ион>_test.png
-      R² на test: строки — нормировка спектров, столбцы — каналов, панель — k.
-  bsbs_curves/<perceptron|ridge>/<ион>_<test|valid>.png
-      R² от k, линии — нормировки спектров (внутри отбора каналы z-score).
-  bsbs_maps/<ион>/<спектр>__<каналы>/importance.png — все каналы, цвет — место в рейтинге;
-                                  top<k>.png       — первые k каналов (k до 1000).
-  bsbs_ridge_topk.csv — кеш Ridge по всем k.
+  bsbs_heatmaps/<perceptron|ridge>/<r2|mse|mae>/<ион>_test.png
+  bsbs_curves/<perceptron|ridge>/<r2|mse|mae>/<ион>_<test|valid>.png
+  bsbs_maps/<ион>/<спектр>__<каналы>/importance.png и top<k>.png
+  bsbs_ridge_metrics.csv — кеш Ridge.
 """
 from __future__ import annotations
 
@@ -31,10 +35,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.colors import LogNorm
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from run_6p_norm_grid import linear_check, load
+from run_6p_linear_selection_per_ion import N_TRAIN, N_VALID, load_ion
+from run_6p_norm_grid import ALPHA, load
 from src.visualization.eem_selection import (
     EM_NM,
     EXC_NM,
@@ -55,6 +64,9 @@ CHANNELS = ["zscore", "pareto", "robust", "center"]
 FULL = 5427
 KS = [10, 50, 100, 250, 500, 1000, 1500, 2000, 3000, 4000, FULL]
 MAP_KS = [10, 50, 100, 250, 500, 1000]
+METRICS = ("r2", "mse", "mae")
+METRIC_LABEL = {"r2": "R²", "mse": "MSE", "mae": "MAE"}
+LOWER_IS_BETTER = {"r2": False, "mse": True, "mae": True}
 SPECTRUM_LABEL = {
     "raw": "без нормировки",
     "max": "на максимум",
@@ -70,46 +82,86 @@ def k_label(k: int) -> str:
     return "все 5427" if k == FULL else str(k)
 
 
+def target_variances() -> dict[str, dict[str, float]]:
+    """Дисперсии y (ddof=0) по выборкам: R² ↔ MSE и пересчёт ошибки validation в исходные единицы."""
+    result = {}
+    for ion in TARGETS:
+        _, y = load_ion(ion)
+        values = y.to_numpy(dtype=float)
+        result[ion] = {
+            "train": float(values[:N_TRAIN].var()),
+            "valid": float(values[N_TRAIN:N_TRAIN + N_VALID].var()),
+            "test": float(values[N_TRAIN + N_VALID:].var()),
+        }
+    return result
+
+
+def _test_mae(run_dir: Path) -> list[float] | None:
+    path = run_dir / "metrics.xlsx"
+    if not path.exists():
+        return None
+    raw = pd.read_excel(path, sheet_name="Raw_Results")
+    return raw["Test_MAE_Target1"].astype(float).tolist()
+
+
 def perceptron_points() -> pd.DataFrame:
-    """R² персептрона и разброс по seed для BSBS и для всех каналов."""
+    """Метрики персептрона: среднее и std по 3 seed для BSBS и для всех каналов."""
+    variances = target_variances()
     rows = []
-    for spectrum, channel, ion in itertools.product(SPECTRA, CHANNELS, TARGETS):
-        path = GRID / f"{spectrum}__{channel}" / "ppop" / ion / "curve_points.json"
-        if path.exists():
-            for point in json.loads(path.read_text(encoding="utf-8")):
-                rows.append(_point_row(spectrum, channel, ion, point))
-    for spectrum, ion in itertools.product(SPECTRA, TARGETS):
-        path = GRID / f"{spectrum}__all_channels" / ion / "curve_points.json"
-        if path.exists():
-            for point in json.loads(path.read_text(encoding="utf-8")):
-                # Полный набор один и тот же при любой нормировке каналов.
-                for channel in CHANNELS:
-                    rows.append(_point_row(spectrum, channel, ion, point))
+    sources = [
+        (spectrum, [channel], GRID / f"{spectrum}__{channel}" / "ppop" / ion, ion)
+        for spectrum, channel, ion in itertools.product(SPECTRA, CHANNELS, TARGETS)
+    ]
+    # Полный набор один и тот же при любой нормировке каналов.
+    sources += [
+        (spectrum, CHANNELS, GRID / f"{spectrum}__all_channels" / ion, ion)
+        for spectrum, ion in itertools.product(SPECTRA, TARGETS)
+    ]
+    for spectrum, channels, ion_dir, ion in sources:
+        path = ion_dir / "curve_points.json"
+        if not path.exists():
+            continue
+        var = variances[ion]
+        for point in json.loads(path.read_text(encoding="utf-8")):
+            r2_test = np.array([run["r2"] for run in point["runs"]])
+            r2_valid = np.array([run["r2_valid"] for run in point["runs"]])
+            values = {
+                "r2_test": r2_test,
+                "r2_valid": r2_valid,
+                "mse_test": (1.0 - r2_test) * var["test"],
+                "mse_valid": (1.0 - r2_valid) * var["valid"],
+            }
+            mae = _test_mae(ion_dir / f"k{point['k']}")
+            if mae is not None:
+                values["mae_test"] = np.array(mae)
+            row = {"spectrum": spectrum, "ion": ion, "k": int(point["k"])}
+            for name, series in values.items():
+                row[name] = float(series.mean())
+                row[f"{name}_sd"] = float(series.std(ddof=1))
+            for channel in channels:
+                rows.append({**row, "channel": channel})
     return pd.DataFrame(rows)
-
-
-def _point_row(spectrum: str, channel: str, ion: str, point: dict) -> dict:
-    tests = [run["r2"] for run in point["runs"]]
-    valids = [run["r2_valid"] for run in point["runs"]]
-    return {
-        "spectrum": spectrum,
-        "channel": channel,
-        "ion": ion,
-        "k": int(point["k"]),
-        "test": float(np.mean(tests)),
-        "test_sd": float(np.std(tests, ddof=1)),
-        "valid": float(np.mean(valids)),
-        "valid_sd": float(np.std(valids, ddof=1)),
-    }
 
 
 def ranking(spectrum: str, channel: str, ion: str) -> pd.DataFrame:
     return pd.read_csv(GRID / f"{spectrum}__{channel}" / "ppop" / ion / "ranking.csv")
 
 
+def _ridge_scores(X: pd.DataFrame, y: pd.Series, columns: list[str]) -> dict:
+    train = slice(0, N_TRAIN)
+    model = make_pipeline(StandardScaler(), Ridge(alpha=ALPHA)).fit(X.iloc[train][columns], y.iloc[train])
+    scores = {}
+    for split, rows in (("valid", slice(N_TRAIN, N_TRAIN + N_VALID)), ("test", slice(N_TRAIN + N_VALID, None))):
+        truth, prediction = y.iloc[rows], model.predict(X.iloc[rows][columns])
+        scores[f"r2_{split}"] = float(r2_score(truth, prediction))
+        scores[f"mse_{split}"] = float(mean_squared_error(truth, prediction))
+        scores[f"mae_{split}"] = float(mean_absolute_error(truth, prediction))
+    return scores
+
+
 def ridge_points() -> pd.DataFrame:
-    """Ridge alpha=700 на первых k каналах рейтинга BSBS (как linear_check), с кешем."""
-    path = OUT / "bsbs_ridge_topk.csv"
+    """Ridge alpha=700 на первых k каналах рейтинга BSBS, все метрики, с кешем."""
+    path = OUT / "bsbs_ridge_metrics.csv"
     done = pd.read_csv(path) if path.exists() else pd.DataFrame(columns=["spectrum", "channel", "ion", "k"])
     have = set(zip(done["spectrum"], done["channel"], done["ion"], done["k"].astype(int)))
     rows = []
@@ -121,13 +173,12 @@ def ridge_points() -> pd.DataFrame:
         full = None
         for channel, k in need:
             if k == FULL:
-                full = full or linear_check(X, y, list(X.columns))["ridge"]
+                full = full or _ridge_scores(X, y, list(X.columns))
                 scores = full
             else:
                 ordered = ranking(spectrum, channel, ion).sort_values("Individual_Rank")["Feature"].astype(str)
-                scores = linear_check(X, y, ordered.tolist()[:k])["ridge"]
-            rows.append({"spectrum": spectrum, "channel": channel, "ion": ion, "k": k,
-                         "test": scores["test"], "valid": scores["valid"]})
+                scores = _ridge_scores(X, y, ordered.tolist()[:k])
+            rows.append({"spectrum": spectrum, "channel": channel, "ion": ion, "k": k, **scores})
         print("ridge", spectrum, ion, flush=True)
     if rows:
         done = pd.concat([done, pd.DataFrame(rows)], ignore_index=True)
@@ -135,9 +186,18 @@ def ridge_points() -> pd.DataFrame:
     return done
 
 
-def heatmaps(table: pd.DataFrame, model: str) -> None:
-    folder = OUT / "bsbs_heatmaps" / model
+def _number(value: float, metric: str) -> str:
+    return f"{value:.3f}" if metric == "r2" or abs(value) < 100 else f"{value:.1f}"
+
+
+def heatmaps(table: pd.DataFrame, model: str, metric: str) -> None:
+    column = f"{metric}_test"
+    if column not in table.columns:
+        print("skip heatmaps", model, metric, "— нет данных", flush=True)
+        return
+    folder = OUT / "bsbs_heatmaps" / model / metric
     folder.mkdir(parents=True, exist_ok=True)
+    cmap = "viridis_r" if LOWER_IS_BETTER[metric] else "viridis"
     for ion in TARGETS:
         part = table[table["ion"] == ion].set_index(["spectrum", "channel", "k"])
         nrows = -(-len(KS) // 4)
@@ -149,31 +209,35 @@ def heatmaps(table: pd.DataFrame, model: str) -> None:
             spread = np.full_like(grid, np.nan)
             for (i, s), (j, c) in itertools.product(enumerate(SPECTRA), enumerate(CHANNELS)):
                 if (s, c, k) in part.index:
-                    grid[i, j] = part.loc[(s, c, k), "test"]
-                    if "test_sd" in part.columns:
-                        spread[i, j] = part.loc[(s, c, k), "test_sd"]
+                    grid[i, j] = part.loc[(s, c, k), column]
+                    if f"{column}_sd" in part.columns:
+                        spread[i, j] = part.loc[(s, c, k), f"{column}_sd"]
             ax.set_xticks(range(len(CHANNELS)), CHANNELS, fontsize=8)
             ax.set_yticks(range(len(SPECTRA)), [SPECTRUM_LABEL[s] for s in SPECTRA], fontsize=8)
             ax.set_title(f"k = {k_label(k)}", fontsize=10)
             if np.isnan(grid).all():
                 ax.imshow(np.zeros_like(grid), cmap="Greys", vmin=0, vmax=1, aspect="auto")
-                ax.text(1.5, 2.5, "нет данных\n(досчитать на сервере)", ha="center", va="center", fontsize=10)
+                ax.text(1.5, 2.5, "нет данных", ha="center", va="center", fontsize=10)
                 continue
             low, high = np.nanmin(grid), np.nanmax(grid)
-            image = ax.imshow(np.ma.masked_invalid(grid), cmap="viridis", vmin=low, vmax=high, aspect="auto")
+            image = ax.imshow(np.ma.masked_invalid(grid), cmap=cmap, vmin=low, vmax=high, aspect="auto")
             for i, j in itertools.product(range(len(SPECTRA)), range(len(CHANNELS))):
                 if np.isnan(grid[i, j]):
                     ax.text(j, i, "нет", ha="center", va="center", fontsize=7, color="gray")
                     continue
-                color = "white" if grid[i, j] < low + 0.6 * (high - low) else "black"
-                label = f"{grid[i, j]:.3f}"
+                good = (grid[i, j] - low) / (high - low + 1e-300)
+                if LOWER_IS_BETTER[metric]:
+                    good = 1 - good
+                color = "white" if good < 0.6 else "black"
+                label = _number(grid[i, j], metric)
                 if not np.isnan(spread[i, j]):
-                    label += f"\n±{spread[i, j]:.3f}"
+                    label += f"\n±{_number(spread[i, j], metric)}"
                 ax.text(j, i, label, ha="center", va="center", fontsize=7, color=color)
             fig.colorbar(image, ax=ax, fraction=0.046, pad=0.03)
         note = "± std по 3 seed" if model == "perceptron" else "без случайности"
+        better = "меньше — лучше" if LOWER_IS_BETTER[metric] else "больше — лучше"
         fig.suptitle(
-            f"{ion}: BSBS, {MODEL_TITLE[model]} на первых k каналах, R² на test ({note})",
+            f"{ion}: BSBS, {MODEL_TITLE[model]} на первых k каналах, {METRIC_LABEL[metric]} на test ({note}; {better})",
             y=1.0,
         )
         fig.tight_layout()
@@ -181,27 +245,31 @@ def heatmaps(table: pd.DataFrame, model: str) -> None:
         plt.close(fig)
 
 
-def curves(table: pd.DataFrame, model: str) -> None:
-    folder = OUT / "bsbs_curves" / model
-    folder.mkdir(parents=True, exist_ok=True)
+def curves(table: pd.DataFrame, model: str, metric: str) -> None:
+    folder = OUT / "bsbs_curves" / model / metric
     colors = plt.get_cmap("tab10")
     for ion, split in itertools.product(TARGETS, ("test", "valid")):
-        part = table[(table["ion"] == ion) & (table["channel"] == "zscore")]
+        column = f"{metric}_{split}"
+        if column not in table.columns:
+            continue
+        folder.mkdir(parents=True, exist_ok=True)
+        part = table[(table["ion"] == ion) & (table["channel"] == "zscore")].dropna(subset=[column])
         fig, ax = plt.subplots(figsize=(9, 5.8))
         for i, spectrum in enumerate(SPECTRA):
             line = part[part["spectrum"] == spectrum].sort_values("k")
             line = line[line["k"].isin(KS)]
             if line.empty:
                 continue
-            errors = line[f"{split}_sd"] if f"{split}_sd" in line.columns else None
+            errors = line[f"{column}_sd"] if f"{column}_sd" in line.columns else None
             ax.errorbar(
-                line["k"], line[split], yerr=errors, fmt="o-", capsize=3, color=colors(i), label=SPECTRUM_LABEL[spectrum]
+                line["k"], line[column], yerr=errors, fmt="o-", capsize=3, color=colors(i), label=SPECTRUM_LABEL[spectrum]
             )
         ax.set_xscale("log")
         ax.set_xticks(KS, [k_label(k) for k in KS], rotation=45, ha="right")
         ax.minorticks_off()
         ax.set_xlabel("Число каналов k (первые k рейтинга BSBS; «все 5427» — без отбора)")
-        ax.set_ylabel(f"R² на {split}")
+        better = "меньше — лучше" if LOWER_IS_BETTER[metric] else "больше — лучше"
+        ax.set_ylabel(f"{METRIC_LABEL[metric]} на {split} ({better})")
         ax.grid(True, alpha=0.3)
         ax.legend(title="Нормировка спектров", fontsize=8)
         missing = sorted(set(KS) - set(part["k"]))
@@ -260,10 +328,10 @@ def main() -> None:
     args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     tables = {"perceptron": perceptron_points(), "ridge": ridge_points()}
-    for model, table in tables.items():
-        heatmaps(table, model)
-        curves(table, model)
-        print("plots", model, flush=True)
+    for (model, table), metric in itertools.product(tables.items(), METRICS):
+        heatmaps(table, model, metric)
+        curves(table, model, metric)
+        print("plots", model, metric, flush=True)
     if not args.skip_maps:
         maps()
     print("done", OUT, flush=True)
