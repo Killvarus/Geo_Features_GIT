@@ -61,7 +61,7 @@ GRID = ROOT / "experiments" / "6p_norm_grid"
 OUT = GRID / "analysis"
 CACHE = ROOT / "experiments" / "6p_full_patience300" / "xy_cv1.npz"
 TARGETS = ["Cu", "Ni", "Al", "Co", "Cr", "NO3"]
-SPECTRA = ["raw", "max", "area", "snv", "raman", "row_max"]
+SPECTRA = ["raw", "max", "area", "snv", "row_max"]
 CHANNELS = ["zscore", "pareto", "robust", "center"]
 FULL = 5427
 KS = [10, 50, 100, 250, 500, 1000, 1500, 2000, 3000, 4000, FULL]
@@ -74,7 +74,6 @@ SPECTRUM_LABEL = {
     "max": "на максимум",
     "area": "на площадь",
     "snv": "SNV",
-    "raman": "на пик воды",
     "row_max": "по строкам",
 }
 MODEL_TITLE = {"perceptron": "персептрон", "ridge": "Ridge alpha=700"}

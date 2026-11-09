@@ -45,7 +45,7 @@ GRID = ROOT / "experiments" / "6p_norm_grid"
 OUT = GRID / "analysis"
 CACHE = ROOT / "experiments" / "6p_full_patience300" / "xy_cv1.npz"
 TARGETS = ["Cu", "Ni", "Al", "Co", "Cr", "NO3"]
-SPECTRA = ["raw", "max", "area", "snv", "raman", "row_max"]
+SPECTRA = ["raw", "max", "area", "snv", "row_max"]
 CHANNELS = ["zscore", "pareto", "robust", "center"]
 METHODS = ["ppop", "rfe"]
 KS = [10, 30, 100, 300]
@@ -54,7 +54,6 @@ SPECTRUM_LABEL = {
     "max": "на максимум",
     "area": "на площадь",
     "snv": "SNV",
-    "raman": "на пик воды",
     "row_max": "по строкам",
 }
 METHOD_LABEL = {"ppop": "ППОП", "rfe": "RFE"}

@@ -2,8 +2,8 @@ from run_6p_norm_grid import CF_SKIP, cf_combos, describe, jobs
 
 
 def test_job_sets_have_expected_sizes():
-    assert len(jobs("base")) == 6 * 6 + 6 * 4 * 2 * 6
-    assert len(jobs("chfirst")) == 13 * 6 + 13 * 2 * 6
+    assert len(jobs("base")) == 5 * 6 + 5 * 4 * 2 * 6
+    assert len(jobs("chfirst")) == 10 * 6 + 10 * 2 * 6
     assert len(jobs("all")) == len(jobs("base")) + len(jobs("chfirst"))
     assert len(set(jobs("all"))) == len(jobs("all"))
     assert {("zscore", "area"), ("robust", "area")} == CF_SKIP

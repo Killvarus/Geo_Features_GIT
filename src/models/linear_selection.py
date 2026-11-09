@@ -287,18 +287,40 @@ class _Split:
         self.X_eval = X_eval
         self.y_eval = y_eval - y_mean
 
-    def sse_without_each(self, columns: np.ndarray, alpha: float) -> tuple[np.ndarray, float]:
-        """SSE на оценочной части для модели на columns и для каждой модели без одного признака."""
+    def state(self, columns: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """A⁻¹, β, остаток на оценочной части и X_eval·A⁻¹ для модели на columns."""
         inverse = _inverse(self.gram[np.ix_(columns, columns)], alpha, self.n_fit)
         beta = inverse @ self.xty[columns]
         X_eval = self.X_eval[:, columns]
         residual = self.y_eval - X_eval @ beta
         shift = X_eval @ inverse
+        return inverse, beta, residual, shift
+
+    def sse_without_each(self, columns: np.ndarray, alpha: float, state=None) -> tuple[np.ndarray, float]:
+        """SSE на оценочной части для модели на columns и для каждой модели без одного признака."""
+        inverse, beta, residual, shift = self.state(columns, alpha) if state is None else state
         coef = beta / np.diag(inverse)
         base = float(residual @ residual)
         # Остаток без признака j: residual + shift[:, j]·coef[j].
         sse = base + 2.0 * coef * (residual @ shift) + coef**2 * np.einsum("ij,ij->j", shift, shift)
         return sse, base
+
+    def sse_with_each(self, columns: np.ndarray, candidates: np.ndarray, alpha: float, state) -> np.ndarray:
+        """
+        SSE на оценочной части для модели на columns плюс один признак k из candidates.
+
+        Окаймление A: s = Gₖₖ + alpha − gᵀA⁻¹g при g = G[columns, k], коэффициент
+        нового признака γ = ((Xᵀy)ₖ − gᵀβ) / s, остальные β − A⁻¹g·γ. Остаток
+        становится r − γ·(X_eval[:, k] − X_eval·A⁻¹·g). Точно, без обучения моделей.
+        """
+        inverse, beta, residual, shift = state
+        border = self.gram[np.ix_(columns, candidates)]
+        solved = inverse @ border
+        schur = self.gram[candidates, candidates] + alpha - np.einsum("ij,ij->j", border, solved)
+        gamma = (self.xty[candidates] - border.T @ beta) / schur
+        direction = self.X_eval[:, candidates] - shift @ border
+        base = float(residual @ residual)
+        return base - 2.0 * gamma * (residual @ direction) + gamma**2 * np.einsum("ij,ij->j", direction, direction)
 
 
 class LinearPPOP(_SelectorBase):
@@ -413,6 +435,168 @@ class LinearPPOP(_SelectorBase):
 
         self.ranking_ = _ranks(names, packets, scores)
         self.history_ = pd.DataFrame(history)
+        self.elapsed_seconds_ = time.perf_counter() - started
+        return self
+
+
+class LinearFloatingBSBS(_SelectorBase):
+    """
+    BSBS с возвратом признаков (плавающий обратный отбор, Pudil et al. 1994) на Ridge, K-fold на train.
+
+    Итерация:
+      1. Для текущего набора S считаются ошибки без каждого признака (как в LinearPPOP)
+         и с каждым ранее выброшенным признаком (Split.sse_with_each), из той же A⁻¹.
+      2. Обмен: берётся выброшенный признак k, с которым ошибка меньше всего. Если она
+         меньше ошибки S, для S + k считаются ошибки без каждого признака, кроме k, и
+         лучший обмен S + k − j принимается, только если ошибка строго падает.
+         Не больше max_swaps обменов подряд, потом пакет выбрасывается как обычно.
+      3. Выбрасывается пакет признаков, без которых ошибка выросла меньше всего.
+    Все ошибки — суммы по фолдам, решения точные, без обучения отдельных моделей.
+
+    Наборы разных размеров не вложены: признак может уйти и вернуться. Поэтому для
+    каждого k из ks пакет укорачивается так, чтобы набор прошёл ровно через k, и
+    итоговый набор этого размера сохраняется в sets_[k]. ranking_ — порядок
+    последнего выбрасывания (для совместимости), sets_ — сами отобранные наборы.
+    При max_swaps=0 и без ks результат совпадает с LinearPPOP.
+    """
+
+    def __init__(
+        self,
+        alpha: float = 700.0,
+        step=0.1,
+        min_step: int = 1,
+        cv: int = 5,
+        random_state: int = 0,
+        scaling: str = "zscore",
+        max_swaps: int = 5,
+        ks: list[int] | None = None,
+    ):
+        check_step(step)
+        if cv < 2:
+            raise ValueError("cv должен быть >= 2")
+        alpha = _check_alpha(alpha)
+        if isinstance(alpha, str):
+            raise ValueError("LinearFloatingBSBS поддерживает только числовой alpha")
+        if isinstance(max_swaps, bool) or not isinstance(max_swaps, Integral) or max_swaps < 0:
+            raise ValueError("max_swaps должен быть целым >= 0")
+        self.alpha = alpha
+        self.step = step
+        self.min_step = int(min_step)
+        self.cv = int(cv)
+        self.random_state = random_state
+        self.scaling = _check_scaling(scaling)
+        self.max_swaps = int(max_swaps)
+        self.ks = sorted({int(k) for k in ks}) if ks else []
+        self.ranking_ = None
+        self.history_ = None
+        self.swaps_ = None
+        self.sets_ = None
+        self.elapsed_seconds_ = None
+
+    def fit(self, X: pd.DataFrame, y) -> "LinearFloatingBSBS":
+        names: list[Hashable] = list(X.columns)
+        started = time.perf_counter()
+        values = X.to_numpy(dtype=float)
+        target = _as_target(y, len(X))
+        folds = KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
+        splits = [_Split(values[fit], target[fit], values[held], target[held], self.scaling) for fit, held in folds.split(values)]
+        n_eval = sum(split.n_eval for split in splits)
+        alpha = self.alpha
+
+        def evaluate(columns: np.ndarray, candidates: np.ndarray | None):
+            without = np.zeros(columns.size)
+            added = None if candidates is None else np.zeros(candidates.size)
+            base = 0.0
+            for split in splits:
+                state = split.state(columns, alpha)
+                part, part_base = split.sse_without_each(columns, alpha, state)
+                without += part
+                base += part_base
+                if candidates is not None:
+                    added += split.sse_with_each(columns, candidates, alpha, state)
+            return without, added, base
+
+        # По возрастанию: targets[-1] — ближайший размер ниже текущего.
+        targets = [k for k in self.ks if 0 < k < len(names)]
+        active = np.arange(len(names))
+        removed = np.array([], dtype=int)
+        last_drop: dict[int, tuple[int, float]] = {}
+        sets: dict[int, list] = {}
+        history, swaps = [], []
+        iteration = 0
+        while active.size:
+            step_started = time.perf_counter()
+            done_swaps = 0
+            while True:
+                check = removed if removed.size and done_swaps < self.max_swaps else None
+                without, added, base = evaluate(active, check)
+                if check is None:
+                    break
+                best = _ordered(removed, added, names, descending=False)[0]
+                if not added[best] < base:
+                    break
+                k = int(removed[best])
+                candidate = np.append(active, k)
+                after, _, _ = evaluate(candidate, None)
+                after[-1] = np.inf
+                worst = _ordered(candidate, after, names, descending=False)[0]
+                # Обмен — только при строгом падении ошибки, иначе возможен цикл.
+                if not after[worst] < base * (1.0 - 1e-12):
+                    break
+                j = int(candidate[worst])
+                active = np.sort(np.delete(candidate, worst))
+                removed = np.sort(np.append(removed[removed != k], j))
+                last_drop.pop(k, None)
+                last_drop[j] = (iteration, float(after[worst] / n_eval - base / n_eval))
+                swaps.append(
+                    {
+                        "iteration": iteration,
+                        "n_features": int(active.size),
+                        "added": names[k],
+                        "removed": names[j],
+                        "mse_before": base / n_eval,
+                        "mse_after": float(after[worst] / n_eval),
+                        "features": [names[i] for i in active],
+                    }
+                )
+                done_swaps += 1
+            if targets and active.size == targets[-1]:
+                sets[targets.pop()] = [names[i] for i in active]
+            mse_full = base / n_eval
+            increase = without / n_eval - mse_full
+            size = packet_size(active.size, self.step, self.min_step)
+            if targets and active.size - size < targets[-1]:
+                size = active.size - targets[-1]
+            drop = _ordered(active, increase, names, descending=False)[:size]
+            for i in drop:
+                last_drop[int(active[i])] = (iteration, float(increase[i]))
+            history.append(
+                {
+                    "n_features": int(active.size),
+                    "alpha": alpha,
+                    "mse": mse_full,
+                    "dropped": size,
+                    "swaps": done_swaps,
+                    "seconds": time.perf_counter() - step_started,
+                }
+            )
+            print(
+                f"FBSBS {len(history)}: features {active.size}, mse {mse_full:.6g}, swaps {done_swaps}, "
+                f"dropped {size}, step_s {history[-1]['seconds']:.1f}",
+                flush=True,
+            )
+            removed = np.sort(np.append(removed, active[drop]))
+            active = np.delete(active, drop)
+            iteration += 1
+
+        packets = [[] for _ in range(iteration)]
+        for i, (when, _) in last_drop.items():
+            packets[when].append(i)
+        scores = {i: score for i, (_, score) in last_drop.items()}
+        self.ranking_ = _ranks(names, [packet for packet in packets if packet], scores)
+        self.history_ = pd.DataFrame(history)
+        self.swaps_ = pd.DataFrame(swaps, columns=["iteration", "n_features", "added", "removed", "mse_before", "mse_after", "features"])
+        self.sets_ = sets
         self.elapsed_seconds_ = time.perf_counter() - started
         return self
 

@@ -7,7 +7,6 @@ from src.preprocessing.spectrum_norm import (
     SPECTRUM_NORMS,
     fluorescence_mask,
     normalize_spectra,
-    raman_height,
 )
 
 
@@ -30,17 +29,12 @@ def test_mask_drops_both_scatter_orders():
     assert mask[list(EXC_NM).index(355), list(EM_NM).index(450)]
 
 
-@pytest.mark.parametrize("method", ["max", "area", "raman"])
+@pytest.mark.parametrize("method", ["max", "area"])
 def test_multiplicative_norms_remove_overall_brightness(method):
     X = _spectra()
     both = np.vstack([X, 2 * X])
     doubled = normalize_spectra(both, method, n_train=len(both))
-    keep = np.ones(len(X), dtype=bool)
-    if method == "raman":
-        # Самые слабые пики упираются в нижнюю границу (1-й процентиль) — там равенства нет.
-        height = raman_height(both)
-        keep = height[: len(X)] > np.percentile(height, 1)
-    np.testing.assert_allclose(doubled[: len(X)][keep], doubled[len(X):][keep], rtol=1e-6, atol=1e-9)
+    np.testing.assert_allclose(doubled[: len(X)], doubled[len(X):], rtol=1e-6, atol=1e-9)
 
 
 def test_max_and_snv_statistics_ignore_scatter():
@@ -62,21 +56,12 @@ def test_row_max_scales_each_excitation_row_separately():
     np.testing.assert_allclose(peaks, 1.0)
 
 
-def test_raman_height_follows_the_water_peak_and_has_a_floor():
-    X = _spectra()
-    height = raman_height(X)
-    assert (height > 1).all()
-    X[0, :] = 1.0
-    scaled = normalize_spectra(X, "raman", n_train=len(X))
-    assert np.isfinite(scaled).all()
-
-
 def test_raw_is_a_copy_and_unknown_method_fails():
     X = _spectra()
     out = normalize_spectra(X, "raw", n_train=len(X))
     assert out is not X
     np.testing.assert_array_equal(out, X)
-    assert set(SPECTRUM_NORMS) == {"raw", "max", "area", "snv", "raman", "row_max"}
+    assert set(SPECTRUM_NORMS) == {"raw", "max", "area", "snv", "row_max"}
     with pytest.raises(ValueError):
         normalize_spectra(X, "minmax", n_train=len(X))
 

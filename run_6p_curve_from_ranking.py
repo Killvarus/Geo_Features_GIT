@@ -23,7 +23,9 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from run_6p_linear_selection_per_ion import TARGETS, load_ion, train_curve
+from run_6p_linear_selection_per_ion import TARGETS, train_curve
+from run_6p_norm_grid import load
+from src.preprocessing.spectrum_norm import SPECTRUM_NORMS
 
 ROOT = Path(__file__).resolve().parent
 
@@ -34,9 +36,10 @@ def main() -> None:
     parser.add_argument("--ion", required=True, choices=TARGETS)
     parser.add_argument("--ks", type=int, nargs="+", required=True)
     parser.add_argument("--out", default="6p_small_k", help="папка результатов в experiments/")
+    parser.add_argument("--spectrum", default="raw", choices=SPECTRUM_NORMS, help="нормировка спектров")
     args = parser.parse_args()
     ranking = pd.read_csv(ROOT / "experiments" / args.ranking_dir / args.ion / "ranking.csv")
-    X, y = load_ion(args.ion)
+    X, y = load(args.spectrum, args.ion)
     directory = ROOT / "experiments" / args.out / args.ranking_dir
     train_curve(directory, args.ion, X, y, ranking, args.ks)
     print(args.ion, args.ranking_dir, "finished", flush=True)
