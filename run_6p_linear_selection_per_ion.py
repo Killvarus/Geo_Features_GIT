@@ -202,6 +202,13 @@ def train_curve(
             }
             for i, result in enumerate(results)
         ]
+        if all("test_pred" in result["history"] for result in results):
+            np.savez_compressed(
+                run_dir / "predictions.npz",
+                test=np.stack([np.ravel(result["history"]["test_pred"]) for result in results]),
+                valid=np.stack([np.ravel(result["history"]["valid_pred"]) for result in results]),
+                seeds=np.array([item["seed"] for item in runs]),
+            )
         r2s = [item["r2"] for item in runs]
         point = {
             "k": k,

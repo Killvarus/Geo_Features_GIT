@@ -508,6 +508,13 @@ def OLP(
         test_pred = scaler_y.inverse_transform(test_pred_scaled)
         test_true = scaler_y.inverse_transform(y_test_scaled)
 
+        valid_input = X_valid_t if use_cuda else X_valid_t.to(device)
+        valid_pred = scaler_y.inverse_transform(model(valid_input).cpu().numpy())
+
+    # Предсказания по примерам — для парных сравнений вариантов и бутстрепа на test.
+    training_history['test_pred'] = test_pred
+    training_history['valid_pred'] = valid_pred
+
     r2_test, mse_test, mae_test, pearson_test = _evaluate_predictions(test_true, test_pred, output_dim)
     df_test = _create_metrics_df(output_dim, r2_test, mse_test, mae_test, pearson_test)
 

@@ -276,7 +276,13 @@ class _Split:
     """Одна пара (обучение, оценка), масштабированная по обучающей части."""
 
     def __init__(
-        self, X_fit: np.ndarray, y_fit: np.ndarray, X_eval: np.ndarray, y_eval: np.ndarray, scaling: str = "zscore"
+        self,
+        X_fit: np.ndarray,
+        y_fit: np.ndarray,
+        X_eval: np.ndarray,
+        y_eval: np.ndarray,
+        scaling: str = "zscore",
+        keep_fit: bool = False,
     ):
         X_fit, X_eval = scale_channels(X_fit, X_eval, method=scaling)
         y_mean = y_fit.mean()
@@ -286,6 +292,9 @@ class _Split:
         self.xty = X_fit.T @ (y_fit - y_mean)
         self.X_eval = X_eval
         self.y_eval = y_eval - y_mean
+        # Для двойственной формы нужны сами строки обучающей части.
+        self.X_fit = X_fit if keep_fit else None
+        self.y_fit = (y_fit - y_mean) if keep_fit else None
 
     def state(self, columns: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """A⁻¹, β, остаток на оценочной части и X_eval·A⁻¹ для модели на columns."""
@@ -296,10 +305,48 @@ class _Split:
         shift = X_eval @ inverse
         return inverse, beta, residual, shift
 
-    def sse_without_each(self, columns: np.ndarray, alpha: float, state=None) -> tuple[np.ndarray, float]:
-        """SSE на оценочной части для модели на columns и для каждой модели без одного признака."""
-        inverse, beta, residual, shift = self.state(columns, alpha) if state is None else state
-        coef = beta / np.diag(inverse)
+    def dual_parts(self, columns: np.ndarray, alpha: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        diag(A⁻¹), β, остаток и X_eval·A⁻¹ через матрицу n × n вместо p × p (тождество Вудбери):
+        A⁻¹ = (I − Xᵀ(XXᵀ + αI)⁻¹X) / α. Выгодно, когда признаков больше, чем строк:
+        O(n²p + n³ + nₑnp) вместо O(p³ + nₑp²). Нужен keep_fit=True и alpha > 0.
+        """
+        if self.X_fit is None:
+            raise ValueError("двойственная форма требует _Split(..., keep_fit=True)")
+        if not alpha > 0.0:
+            raise ValueError("двойственная форма требует alpha > 0")
+        X_fit = self.X_fit[:, columns]
+        kernel = X_fit @ X_fit.T
+        kernel[np.diag_indices_from(kernel)] += alpha
+        factor = lapack.dpotrf(np.asfortranarray(kernel), lower=0, overwrite_a=1)
+        if factor[1] != 0:
+            raise ValueError(f"XXᵀ + alpha·I не разложилась (dpotrf info={factor[1]})")
+        solved, info = lapack.dpotrs(factor[0], X_fit, lower=0)
+        if info != 0:
+            raise ValueError(f"не удалось решить систему (dpotrs info={info})")
+        # solved = (XXᵀ + αI)⁻¹X, столбцы — признаки.
+        beta = solved.T @ self.y_fit
+        diag = (1.0 - np.einsum("ij,ij->j", X_fit, solved)) / alpha
+        X_eval = self.X_eval[:, columns]
+        shift = (X_eval - (X_eval @ X_fit.T) @ solved) / alpha
+        residual = self.y_eval - X_eval @ beta
+        return diag, beta, residual, shift
+
+    def sse_without_each(
+        self, columns: np.ndarray, alpha: float, state=None, solver: str = "primal"
+    ) -> tuple[np.ndarray, float]:
+        """
+        SSE на оценочной части для модели на columns и для каждой модели без одного признака.
+        solver="dual" считает то же через матрицу n × n (dual_parts), результат совпадает до округления.
+        """
+        if solver == "dual":
+            diag, beta, residual, shift = self.dual_parts(columns, alpha)
+        elif solver == "primal":
+            inverse, beta, residual, shift = self.state(columns, alpha) if state is None else state
+            diag = np.diag(inverse)
+        else:
+            raise ValueError('solver должен быть "primal" или "dual"')
+        coef = beta / diag
         base = float(residual @ residual)
         # Остаток без признака j: residual + shift[:, j]·coef[j].
         sse = base + 2.0 * coef * (residual @ shift) + coef**2 * np.einsum("ij,ij->j", shift, shift)
@@ -322,6 +369,23 @@ class _Split:
         base = float(residual @ residual)
         return base - 2.0 * gamma * (residual @ direction) + gamma**2 * np.einsum("ij,ij->j", direction, direction)
 
+    def sse_without_groups(
+        self, columns: np.ndarray, groups: list[np.ndarray], alpha: float, state=None
+    ) -> tuple[np.ndarray, float]:
+        """
+        SSE без каждой группы признаков целиком. groups — позиции внутри columns.
+        Блочная форма той же формулы: β без группы G = β − A⁻¹[:, G]·(A⁻¹[G, G])⁻¹·β_G,
+        остаток r + M[:, G]·(A⁻¹[G, G])⁻¹·β_G. Точно, без обучения моделей.
+        """
+        inverse, beta, residual, shift = self.state(columns, alpha) if state is None else state
+        base = float(residual @ residual)
+        sse = np.empty(len(groups))
+        for g, positions in enumerate(groups):
+            coef = np.linalg.solve(inverse[np.ix_(positions, positions)], beta[positions])
+            changed = residual + shift[:, positions] @ coef
+            sse[g] = float(changed @ changed)
+        return sse, base
+
 
 class LinearPPOP(_SelectorBase):
     """
@@ -333,6 +397,13 @@ class LinearPPOP(_SelectorBase):
 
     reshuffle=True: на каждой итерации свои случайные фолды. Иначе тысячи решений
     принимаются по одному и тому же разбиению, и отбор подстраивается под его шум.
+
+    repeats > 1: K-fold повторяется repeats раз с разными перемешиваниями (seed, seed+1, …),
+    ошибки суммируются по всем K·repeats разбиениям. Первое повторение совпадает с repeats=1.
+
+    solver: "primal" — обращение p × p (как раньше), "dual" — матрица n × n по тождеству
+    Вудбери, "auto" — dual, пока признаков больше, чем строк в обучающей части фолда.
+    Результат тот же до ошибок округления; dual только для alpha > 0.
     """
 
     def __init__(
@@ -345,10 +416,16 @@ class LinearPPOP(_SelectorBase):
         reshuffle: bool = False,
         switch_at: int = 500,
         scaling: str = "zscore",
+        repeats: int = 1,
+        solver: str = "primal",
     ):
         check_step(step)
         if cv < 2:
             raise ValueError("cv должен быть >= 2")
+        if isinstance(repeats, bool) or not isinstance(repeats, Integral) or repeats < 1:
+            raise ValueError("repeats должен быть целым >= 1")
+        if solver not in ("primal", "dual", "auto"):
+            raise ValueError('solver должен быть "primal", "dual" или "auto"')
         self.alpha = _check_alpha(alpha)
         self.switch_at = _check_switch_at(switch_at)
         self.step = step
@@ -357,17 +434,28 @@ class LinearPPOP(_SelectorBase):
         self.random_state = random_state
         self.reshuffle = bool(reshuffle)
         self.scaling = _check_scaling(scaling)
+        self.repeats = int(repeats)
+        self.solver = solver
         self.ranking_ = None
         self.history_ = None
         self.elapsed_seconds_ = None
 
     def _splits(self, X: np.ndarray, y: np.ndarray, X_eval, y_eval, seed=None) -> list[_Split]:
+        keep_fit = self.solver != "primal"
         if X_eval is not None:
             evaluation = np.asarray(X_eval, dtype=float)
-            return [_Split(X, y, evaluation, _as_target(y_eval, len(X_eval)), self.scaling)]
+            return [_Split(X, y, evaluation, _as_target(y_eval, len(X_eval)), self.scaling, keep_fit)]
         seed = self.random_state if seed is None else seed
-        folds = KFold(n_splits=self.cv, shuffle=True, random_state=seed)
-        return [_Split(X[fit], y[fit], X[held], y[held], self.scaling) for fit, held in folds.split(X)]
+        splits = []
+        for repeat in range(self.repeats):
+            folds = KFold(n_splits=self.cv, shuffle=True, random_state=None if seed is None else seed + repeat)
+            splits += [_Split(X[fit], y[fit], X[held], y[held], self.scaling, keep_fit) for fit, held in folds.split(X)]
+        return splits
+
+    def _solver_for(self, n_features: int, split: _Split) -> str:
+        if self.solver == "auto":
+            return "dual" if n_features > split.n_fit else "primal"
+        return self.solver
 
     def fit(self, X: pd.DataFrame, y, X_eval: pd.DataFrame | None = None, y_eval=None) -> "LinearPPOP":
         if (X_eval is None) != (y_eval is None):
@@ -380,7 +468,6 @@ class LinearPPOP(_SelectorBase):
         target = _as_target(y, len(X))
         reshuffle = self.reshuffle and X_eval is None
         splits = None if reshuffle else self._splits(values, target, X_eval, y_eval)
-        n_eval = len(target) if reshuffle else sum(split.n_eval for split in splits)
         if isinstance(self.alpha, str):
             (scaled,) = scale_channels(values, method=self.scaling)
             centered = target - target.mean()
@@ -405,8 +492,9 @@ class LinearPPOP(_SelectorBase):
                 columns = np.arange(remaining.size)
             else:
                 current, columns = splits, remaining
+            n_eval = sum(split.n_eval for split in current)
             for split in current:
-                part, part_base = split.sse_without_each(columns, alpha)
+                part, part_base = split.sse_without_each(columns, alpha, solver=self._solver_for(columns.size, split))
                 sse += part
                 base += part_base
             mse_full = base / n_eval
@@ -432,6 +520,105 @@ class LinearPPOP(_SelectorBase):
                 flush=True,
             )
             remaining = np.delete(remaining, drop)
+
+        self.ranking_ = _ranks(names, packets, scores)
+        self.history_ = pd.DataFrame(history)
+        self.elapsed_seconds_ = time.perf_counter() - started
+        return self
+
+
+class LinearGroupBSBS(_SelectorBase):
+    """
+    BSBS по группам признаков (например, окна соседних каналов спектра) на Ridge, K-fold на train.
+
+    groups — метка группы для каждого столбца X. На итерации для каждой оставшейся группы
+    точно считается ошибка модели без всей группы (Split.sse_without_groups), выбрасывается
+    пакет групп с наименьшим приростом ошибки. Признаки группы получают её оценку и идут
+    в рейтинге подряд (по имени). repeats — как в LinearPPOP.
+    """
+
+    def __init__(
+        self,
+        groups,
+        alpha: float = 700.0,
+        step=0.1,
+        min_step: int = 1,
+        cv: int = 5,
+        random_state: int = 0,
+        scaling: str = "zscore",
+        repeats: int = 1,
+    ):
+        check_step(step)
+        alpha = _check_alpha(alpha)
+        if isinstance(alpha, str):
+            raise ValueError("LinearGroupBSBS поддерживает только числовой alpha")
+        self.groups = list(groups)
+        self.alpha = alpha
+        self.step = step
+        self.min_step = int(min_step)
+        self.cv = int(cv)
+        self.random_state = random_state
+        self.scaling = _check_scaling(scaling)
+        self.repeats = int(repeats)
+        self.ranking_ = None
+        self.history_ = None
+        self.elapsed_seconds_ = None
+
+    def fit(self, X: pd.DataFrame, y) -> "LinearGroupBSBS":
+        names: list[Hashable] = list(X.columns)
+        if len(self.groups) != len(names):
+            raise ValueError("groups должен содержать метку для каждого столбца X")
+        started = time.perf_counter()
+        values = X.to_numpy(dtype=float)
+        target = _as_target(y, len(X))
+        splits = LinearPPOP(alpha=self.alpha, cv=self.cv, random_state=self.random_state, scaling=self.scaling,
+                            repeats=self.repeats)._splits(values, target, None, None)
+        n_eval = sum(split.n_eval for split in splits)
+        members: dict = {}
+        for i, label in enumerate(self.groups):
+            members.setdefault(label, []).append(i)
+        remaining = list(members)
+        packets: list[list[int]] = []
+        scores: dict[int, float] = {}
+        history = []
+        while remaining:
+            step_started = time.perf_counter()
+            columns = np.concatenate([members[g] for g in remaining])
+            offsets = np.cumsum([0] + [len(members[g]) for g in remaining])
+            positions = [np.arange(offsets[i], offsets[i + 1]) for i in range(len(remaining))]
+            sse = np.zeros(len(remaining))
+            base = 0.0
+            for split in splits:
+                part, part_base = split.sse_without_groups(columns, positions, self.alpha)
+                sse += part
+                base += part_base
+            mse_full = base / n_eval
+            increase = sse / n_eval - mse_full
+            size = packet_size(len(remaining), self.step, self.min_step)
+            order = sorted(range(len(remaining)), key=lambda i: (increase[i], str(remaining[i])))[:size]
+            packet = []
+            for i in order:
+                for j in members[remaining[i]]:
+                    scores[j] = float(increase[i])
+                    packet.append(j)
+            packets.append(packet)
+            history.append(
+                {
+                    "n_groups": len(remaining),
+                    "n_features": int(columns.size),
+                    "alpha": self.alpha,
+                    "mse": mse_full,
+                    "dropped_groups": size,
+                    "seconds": time.perf_counter() - step_started,
+                }
+            )
+            print(
+                f"GBSBS {len(history)}: groups {len(remaining)}, features {columns.size}, mse {mse_full:.6g}, "
+                f"dropped {size}, step_s {history[-1]['seconds']:.1f}",
+                flush=True,
+            )
+            dropped = set(order)
+            remaining = [g for i, g in enumerate(remaining) if i not in dropped]
 
         self.ranking_ = _ranks(names, packets, scores)
         self.history_ = pd.DataFrame(history)

@@ -42,6 +42,33 @@ def _positive(denominator: np.ndarray, what: str) -> np.ndarray:
     return denominator
 
 
+INTENSITY_TRANSFORMS = ("none", "asinh", "log")
+
+
+def transform_intensity(X: np.ndarray, method: str, scale: float = 10.0) -> np.ndarray:
+    """
+    Нелинейное преобразование интенсивностей перед нормировкой спектров.
+
+    Ослабление сигнала поглощением (внутренний фильтр, закон Бугера–Ламберта–Бера)
+    мультипликативно: I = I₀·10^(−A), A линейна по концентрациям. После логарифма оно
+    становится аддитивным, а линейная модель внутри отбора — ближе к физике.
+      none  — без изменений;
+      asinh — arcsinh(I / scale): при |I| ≫ scale это log(2I/scale), около нуля — линейно,
+              поэтому отрицательные значения после вычитания фона допустимы;
+      log   — log(max(I, scale)): отрицательные и малые значения прижимаются к scale.
+    """
+    X = np.asarray(X, dtype=float)
+    if not scale > 0:
+        raise ValueError("scale должен быть > 0")
+    if method == "none":
+        return X.copy()
+    if method == "asinh":
+        return np.arcsinh(X / scale)
+    if method == "log":
+        return np.log(np.maximum(X, scale))
+    raise ValueError(f"преобразование должно быть одним из {INTENSITY_TRANSFORMS}")
+
+
 def normalize_spectra(X: np.ndarray, method: str, n_train: int) -> np.ndarray:
     """
     X — (строки, 5427). Все нормировки построчные; n_train оставлен для
