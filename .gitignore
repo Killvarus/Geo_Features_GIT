@@ -5,6 +5,7 @@
 !*.ipynb
 !*.md
 !requirements.txt
+!/run_6p_max_center_queue.sh
 
 __pycache__/
 *.pyc
