@@ -148,7 +148,8 @@ def rank_ion(args, directory: Path, X: pd.DataFrame, y: pd.Series) -> pd.DataFra
 
 
 def train_curve(
-    directory: Path, ion: str, X: pd.DataFrame, y: pd.Series, ranking: pd.DataFrame, ks: list[int] | None = None
+    directory: Path, ion: str, X: pd.DataFrame, y: pd.Series, ranking: pd.DataFrame, ks: list[int] | None = None,
+    *, scale_inputs: bool = True,
 ) -> None:
     ion_dir = directory / ion
     points_path = ion_dir / "curve_points.json"
@@ -190,6 +191,7 @@ def train_curve(
             device="cpu",
             log_file=str(run_dir / "training.log"),
             enable_cv=False,
+            scale_inputs=scale_inputs,
         )
         # best_val_loss — MSE на validation в единицах y, стандартизованного по train.
         variance_ratio = float(np.var(y.iloc[:N_TRAIN]) / np.var(y.iloc[N_TRAIN:N_TRAIN + N_VALID]))

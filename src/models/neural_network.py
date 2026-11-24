@@ -212,6 +212,7 @@ def OLP(
     device: Optional[str] = None,
     log_file: Optional[str] = None,
     enable_cv: bool = True,
+    scale_inputs: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict]:
     """Обучение OLP с early stopping по validation loss."""
     log_path = Path(log_file) if log_file else None
@@ -232,10 +233,13 @@ def OLP(
         X_train, y_train, X_valid, y_valid, X_test, y_test
     )
 
-    scaler_X = StandardScaler()
-    X_train_scaled = scaler_X.fit_transform(X_train)
-    X_valid_scaled = scaler_X.transform(X_valid)
-    X_test_scaled = scaler_X.transform(X_test)
+    if scale_inputs:
+        scaler_X = StandardScaler()
+        X_train_scaled = scaler_X.fit_transform(X_train)
+        X_valid_scaled = scaler_X.transform(X_valid)
+        X_test_scaled = scaler_X.transform(X_test)
+    else:
+        X_train_scaled, X_valid_scaled, X_test_scaled = map(np.asarray, (X_train, X_valid, X_test))
 
     y_train_scaled, y_valid_scaled, y_test_scaled, scaler_y = _scale_targets(y_train, y_valid, y_test, output_dim)
 
@@ -561,6 +565,7 @@ def to_excel_optimized_OLP(
     device: Optional[str] = None,
     log_file: Optional[str] = None,
     enable_cv: bool = True,
+    scale_inputs: bool = True,
 ) -> List[Dict]:
     """Запуск нескольких итераций обучения и сохранение в Excel."""
     log_path = Path(log_file) if log_file else None
@@ -608,6 +613,7 @@ def to_excel_optimized_OLP(
             device=device,
             log_file=log_file,
             enable_cv=enable_cv,
+            scale_inputs=scale_inputs,
         )
 
         all_results.append({
@@ -660,12 +666,14 @@ def to_excel_optimized_OLP(
                 'Parameter': [
                     'n_iter', 'batch_size', 'input_dim', 'output_dim',
                     'learning_rate', 'num_epochs', 'patience', 'hidden_dim',
-                    'optimizer', 'momentum', 'tolerance', 'tolerance_mode', 'random_state', 'device', 'enable_cv'
+                    'optimizer', 'momentum', 'tolerance', 'tolerance_mode', 'random_state', 'device', 'enable_cv',
+                    'scale_inputs',
                 ],
                 'Value': [
                     n_iter, batch_size, input_dim, output_dim,
                     learning_rate, num_epochs, patience, hidden_dim,
-                    optimizer_type, momentum, tolerance, tolerance_mode, random_state, device or 'auto', enable_cv
+                    optimizer_type, momentum, tolerance, tolerance_mode, random_state, device or 'auto', enable_cv,
+                    scale_inputs,
                 ]
             })
             meta.to_excel(writer, sheet_name='Meta', index=False)
