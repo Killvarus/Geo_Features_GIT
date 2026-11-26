@@ -164,6 +164,7 @@ def scale_channels(X_fit: np.ndarray, *others: np.ndarray, method: str = "zscore
                со свободным членом не важен, а быстрые формулы требуют
                центрирования средним);
       center — только минус среднее, масштаб исходный.
+      range — минус среднее, деление на размах обучающего канала.
     Нулевой масштаб заменяется на 1.
     """
     shift, scale = X_fit.mean(axis=0), _channel_scale(X_fit, method)
@@ -190,8 +191,10 @@ def _channel_scale(X_fit: np.ndarray, method: str) -> np.ndarray:
         scale = q75 - q25
     elif method == "center":
         scale = np.ones(X_fit.shape[1])
+    elif method == "range":
+        scale = np.ptp(X_fit, axis=0)
     else:
-        raise ValueError(f"scaling должен быть одним из {SCALINGS}")
+        raise ValueError(f"scaling должен быть одним из {(*SCALINGS, 'range')}")
     return np.where(scale == 0.0, 1.0, scale)
 
 
@@ -201,8 +204,8 @@ def _standardize(X_fit: np.ndarray, *others: np.ndarray) -> list[np.ndarray]:
 
 
 def _check_scaling(scaling: str) -> str:
-    if scaling not in SCALINGS:
-        raise ValueError(f"scaling должен быть одним из {SCALINGS}")
+    if scaling not in (*SCALINGS, "range"):
+        raise ValueError(f"scaling должен быть одним из {(*SCALINGS, 'range')}")
     return scaling
 
 

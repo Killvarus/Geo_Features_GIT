@@ -19,7 +19,7 @@ import torch.optim as optim
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from ..utils.logging_utils import close_logger_file_handlers, logger_name_for_file, setup_logger
@@ -212,7 +212,7 @@ def OLP(
     device: Optional[str] = None,
     log_file: Optional[str] = None,
     enable_cv: bool = True,
-    scale_inputs: bool = True,
+    scale_inputs: bool | str = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Dict]:
     """Обучение OLP с early stopping по validation loss."""
     log_path = Path(log_file) if log_file else None
@@ -234,12 +234,14 @@ def OLP(
     )
 
     if scale_inputs:
-        scaler_X = StandardScaler()
+        scaler_X = MinMaxScaler() if scale_inputs == "minmax" else StandardScaler(with_std=scale_inputs != "center")
         X_train_scaled = scaler_X.fit_transform(X_train)
         X_valid_scaled = scaler_X.transform(X_valid)
         X_test_scaled = scaler_X.transform(X_test)
     else:
-        X_train_scaled, X_valid_scaled, X_test_scaled = map(np.asarray, (X_train, X_valid, X_test))
+        X_train_scaled, X_valid_scaled, X_test_scaled = (
+            np.array(split, dtype=np.float32, copy=True) for split in (X_train, X_valid, X_test)
+        )
 
     y_train_scaled, y_valid_scaled, y_test_scaled, scaler_y = _scale_targets(y_train, y_valid, y_test, output_dim)
 
@@ -287,7 +289,7 @@ def OLP(
     epochs_without_improvement = 0
     best_state = copy.deepcopy(model.state_dict())
 
-    start_time = time.time()
+    start_time = time.perf_counter()
 
     for epoch in range(num_epochs):
         model.train()
@@ -404,7 +406,7 @@ def OLP(
         'best_epoch': best_epoch,
         'best_val_loss': best_val_loss,
         'optimizer': optimizer_type,
-        'total_time': time.time() - start_time,
+        'total_time': time.perf_counter() - start_time,
         'stopped_epoch': len(train_losses),
         'patience': patience,
         'tolerance': tolerance,
@@ -565,7 +567,7 @@ def to_excel_optimized_OLP(
     device: Optional[str] = None,
     log_file: Optional[str] = None,
     enable_cv: bool = True,
-    scale_inputs: bool = True,
+    scale_inputs: bool | str = True,
 ) -> List[Dict]:
     """Запуск нескольких итераций обучения и сохранение в Excel."""
     log_path = Path(log_file) if log_file else None

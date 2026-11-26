@@ -149,8 +149,10 @@ def rank_ion(args, directory: Path, X: pd.DataFrame, y: pd.Series) -> pd.DataFra
 
 def train_curve(
     directory: Path, ion: str, X: pd.DataFrame, y: pd.Series, ranking: pd.DataFrame, ks: list[int] | None = None,
-    *, scale_inputs: bool = True,
+    *, scale_inputs: bool | str = True, n_iter: int = 3,
 ) -> None:
+    if n_iter < 1:
+        raise ValueError("Нужно хотя бы одно обучение персептрона")
     ion_dir = directory / ion
     points_path = ion_dir / "curve_points.json"
     done = {}
@@ -159,8 +161,12 @@ def train_curve(
     ordered = ranking.sort_values("Individual_Rank")["Feature"].tolist()
     points = []
     y_df = y.to_frame()
+    y_valid = y.iloc[N_TRAIN:N_TRAIN + N_VALID].to_numpy()
     for k in ks or k_grid(X.shape[1]):
-        if k in done and len(done[k].get("runs", [])) == 3:
+        saved_runs = len(done.get(k, {}).get("runs", []))
+        if saved_runs > n_iter:
+            raise ValueError(f"{ion}, k={k}: для серии с меньшим числом запусков нужна отдельная папка")
+        if saved_runs == n_iter:
             points.append(done[k])
             print(ion, "skip k", k, flush=True)
             continue
@@ -169,7 +175,7 @@ def train_curve(
         run_dir = ion_dir / f"k{k}"
         results = to_excel_optimized_OLP(
             file_name=str(run_dir / "metrics.xlsx"),
-            n_iter=3,
+            n_iter=n_iter,
             X_train=X.iloc[:N_TRAIN][cols],
             y_train=y_df.iloc[:N_TRAIN],
             X_valid=X.iloc[N_TRAIN:N_TRAIN + N_VALID][cols],
@@ -195,15 +201,20 @@ def train_curve(
         )
         # best_val_loss — MSE на validation в единицах y, стандартизованного по train.
         variance_ratio = float(np.var(y.iloc[:N_TRAIN]) / np.var(y.iloc[N_TRAIN:N_TRAIN + N_VALID]))
-        runs = [
-            {
+        runs = []
+        for i, result in enumerate(results):
+            run = {
                 "seed": 42 + i,
                 "r2": float(result["test"].loc["Оценка1", "R2"]),
                 "r2_valid": 1.0 - float(result["history"]["best_val_loss"]) * variance_ratio,
                 "epochs": int(result["history"]["stopped_epoch"]),
+                "training_seconds": float(result["history"]["total_time"]),
+                "mae_test": float(result["test"].loc["Оценка1", "MAE"]),
             }
-            for i, result in enumerate(results)
-        ]
+            if "valid_pred" in result["history"]:
+                valid_pred = np.ravel(result["history"]["valid_pred"])
+                run["mae_valid"] = float(np.mean(np.abs(y_valid - valid_pred)))
+            runs.append(run)
         if all("test_pred" in result["history"] for result in results):
             np.savez_compressed(
                 run_dir / "predictions.npz",
@@ -216,14 +227,17 @@ def train_curve(
             "k": k,
             "runs": runs,
             "mean": float(np.mean(r2s)),
-            "std": float(np.std(r2s, ddof=1)),
+            "std": float(np.std(r2s, ddof=1)) if len(r2s) > 1 else None,
             "mean_valid": float(np.mean([item["r2_valid"] for item in runs])),
         }
         points.append(point)
         done[k] = point
         merged = sorted(done.values(), key=lambda item: item["k"])
-        points_path.write_text(json.dumps(merged, indent=2), encoding="utf-8")
-        print(ion, "k", k, "R2", round(point["mean"], 4), "±", round(point["std"], 4), flush=True)
+        temporary = points_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+        temporary.replace(points_path)
+        spread = "" if point["std"] is None else f" ± {point['std']:.4f}"
+        print(f"{ion} k {k} R2 {point['mean']:.4f}{spread}", flush=True)
 
 
 def main() -> None:
